@@ -296,6 +296,23 @@ impl App {
         }
     }
 
+    /// Abre el file dialog nativo del OS y, si el usuario elige una carpeta,
+    /// la registra como nuevo workspace (descubriendo repos hijos con `.git/`).
+    fn pick_and_add_workspace(&mut self) {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Selecciona la carpeta del workspace")
+            .pick_folder()
+        else {
+            return;
+        };
+        let workspace = Workspace::from_path(&folder);
+        let id = workspace.id.clone();
+        self.workspaces.push(workspace);
+        self.new_job_modal_state.workspace_id = Some(id);
+        self.new_job_modal_state.repo_id = None;
+        self.mark_dirty();
+    }
+
     fn submit_new_job(&mut self) {
         let request = match self.build_create_request() {
             Some(r) => r,
@@ -362,6 +379,12 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // egui crea popups (ComboBox dropdown, tooltips, menus) como Areas
+        // independientes que NO heredan los Visuals locales del Ui padre. Para
+        // que esos popups respeten el theme dark hay que mantener los Visuals
+        // sincronizados en el Context cada frame. Es una struct copy, barato.
+        ctx.set_visuals(self.theme.build_visuals());
+
         self.drain_worker_events(&ctx);
         self.maybe_persist();
 
@@ -497,6 +520,9 @@ impl eframe::App for App {
                         self.close_new_job_modal();
                     }
                 }
+                ModalAction::PickWorkspace => {
+                    self.pick_and_add_workspace();
+                }
                 ModalAction::None => {}
             }
         }
@@ -508,6 +534,7 @@ impl App {
         let mut clicked_id: Option<String> = None;
         let mut toggle_ws: Option<String> = None;
         let mut toggle_repo: Option<String> = None;
+        let mut add_workspace_clicked = false;
 
         // Clone para evitar lifetime acrobatics: el loop necesita iterar workspaces
         // y simultaneamente leer self.collapsed_workspaces y jobs_for_repo.
@@ -551,6 +578,25 @@ impl App {
                         }
                     }
                 }
+
+                // Boton secundario al final de la lista: anadir otro workspace.
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(8.0);
+                let add_btn = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("+ Anadir workspace").color(self.theme.text_muted),
+                    )
+                    .frame(false),
+                );
+                if add_btn
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Selecciona la carpeta padre donde estan tus repos")
+                    .clicked()
+                {
+                    add_workspace_clicked = true;
+                }
+                ui.add_space(8.0);
             });
 
         if let Some(id) = clicked_id {
@@ -568,6 +614,9 @@ impl App {
                 self.collapsed_repos.insert(id);
             }
             self.mark_dirty();
+        }
+        if add_workspace_clicked {
+            self.pick_and_add_workspace();
         }
     }
 }
