@@ -1836,6 +1836,7 @@ dependencies = [
  "egui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

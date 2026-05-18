@@ -2,12 +2,7 @@ use anyhow::{Context, Result};
 use tracing::info;
 use tracing_appender::non_blocking::WorkerGuard;
 
-mod app;
-mod git;
-mod state;
-mod terminal;
-mod theme;
-mod ui;
+use michi::app;
 
 fn main() -> Result<()> {
     let _log_guard = init_tracing().context("inicializando tracing")?;
