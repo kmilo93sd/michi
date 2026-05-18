@@ -1154,9 +1154,15 @@ fn workspace_header(
         egui::Sense::click(),
     );
 
-    if area_response.hovered() {
+    // Usamos contains_pointer en vez de hovered: hovered se hace false cuando
+    // el cursor entra en un widget hijo con sense propio (el boton "+"), lo
+    // que provocaba flicker cuando el "+" aparecia/desaparecia.
+    let row_hovered = area_response.contains_pointer();
+    if row_hovered {
         ui.painter().rect_filled(rect, 4.0, theme.bg_card_hover);
     }
+    // Cursor pointer en todo el row indica que es interactivo (toggle).
+    let area_response = area_response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
     let mut menu_pick: Option<WorkspaceMenu> = None;
     area_response.context_menu(|ui| {
@@ -1188,38 +1194,22 @@ fn workspace_header(
             .layout(egui::Layout::top_down(egui::Align::LEFT)),
     );
 
-    // Linea 1: chevron + nombre (toggle) + ▶ (play, solo en hover)
+    // Linea 1: chevron + nombre a la izquierda, "+" pegado a la derecha.
+    // El "+" esta SIEMPRE renderizado (sin parpadeo), con color sutil en
+    // idle y accent cuando el row esta hovereado.
     let mut play_clicked = false;
-    let toggle_clicked = child
-        .horizontal(|ui| {
-            let resp = ui
-                .add(
-                    egui::Label::new(
-                        egui::RichText::new(format!("{} {}", chevron, ws.name.to_uppercase()))
-                            .small()
-                            .color(theme.text_workspace_label),
-                    )
-                    .sense(egui::Sense::click()),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if area_response.hovered() {
-                ui.add_space(6.0);
-                let play_resp = ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("\u{25B6}").small().color(theme.accent),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Iniciar trabajo en este workspace");
-                if play_resp.clicked() {
-                    play_clicked = true;
-                }
+    child.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("{} {}", chevron, ws.name.to_uppercase()))
+                .small()
+                .color(theme.text_workspace_label),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if plus_button(ui, theme, row_hovered, "Iniciar trabajo en este workspace") {
+                play_clicked = true;
             }
-            resp.clicked()
-        })
-        .inner;
+        });
+    });
 
     // Linea 2: subtitulo con specs y skills
     child.label(
@@ -1231,11 +1221,41 @@ fn workspace_header(
         .color(theme.text_muted),
     );
 
+    // Toggle = click izquierdo en cualquier parte del row que no haya sido
+    // capturada por el "+". Como el "+" se agrega despues del area_response,
+    // egui priorizara su sense cuando el cursor este sobre el, y el row solo
+    // recibira clicks fuera de el.
+    let toggle_clicked = area_response.clicked();
+
     WorkspaceHeaderOutcome {
         toggle_clicked,
         play_clicked,
         menu_pick,
     }
+}
+
+/// Boton "+" reutilizable: presencia constante, color sutil en idle y accent
+/// cuando el row padre esta hovereado. Devuelve true si se clickeo.
+fn plus_button(ui: &mut egui::Ui, theme: &Theme, row_hovered: bool, tooltip: &str) -> bool {
+    let color = if row_hovered {
+        theme.accent
+    } else {
+        theme.text_muted
+    };
+    let resp = ui
+        .add(
+            egui::Button::new(
+                egui::RichText::new("\u{002B}")
+                    .strong()
+                    .color(color)
+                    .size(16.0),
+            )
+            .frame(false)
+            .min_size(egui::vec2(22.0, 22.0)),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tooltip);
+    resp.clicked()
 }
 
 /// Resultado de interactuar con el header de un repo.
@@ -1262,9 +1282,11 @@ fn repo_header(
         egui::Sense::click(),
     );
 
-    if area_response.hovered() {
+    let row_hovered = area_response.contains_pointer();
+    if row_hovered {
         ui.painter().rect_filled(rect, 4.0, theme.bg_card_hover);
     }
+    let area_response = area_response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
     paint_tree_line(ui, rect, theme, theme.tree_line_ws_x);
 
@@ -1293,42 +1315,27 @@ fn repo_header(
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
 
-    let toggle_resp = child.add(
-        egui::Label::new(
-            egui::RichText::new(format!("{} {}", chevron, name)).color(theme.text_repo_label),
-        )
-        .sense(egui::Sense::click()),
-    );
-    let toggle_resp = toggle_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    child.label(egui::RichText::new(format!("{} {}", chevron, name)).color(theme.text_repo_label));
 
-    // Boton ▶ visible solo en hover del row (Linear-style: revela acciones)
+    // Lado derecho: contador (si hay) + boton "+". Layout right_to_left
+    // mantiene ambos pegados al borde derecho del row.
     let mut play_clicked = false;
-    if area_response.hovered() {
-        child.add_space(8.0);
-        let play_resp = child
-            .add(
-                egui::Button::new(egui::RichText::new("\u{25B6}").small().color(theme.accent))
-                    .frame(false),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Iniciar trabajo en este repo");
-        if play_resp.clicked() {
+    child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if plus_button(ui, theme, row_hovered, "Iniciar trabajo en este repo") {
             play_clicked = true;
         }
-    }
-
-    if job_count > 0 {
-        child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if job_count > 0 {
+            ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(format!("{}", job_count))
                     .small()
                     .color(theme.text_muted),
             );
-        });
-    }
+        }
+    });
 
     RepoHeaderOutcome {
-        toggle_clicked: toggle_resp.clicked(),
+        toggle_clicked: area_response.clicked(),
         play_clicked,
         menu_pick,
     }
@@ -1372,9 +1379,10 @@ fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool, theme: &Theme) 
         }
     });
 
+    let row_hovered = response.contains_pointer();
     let bg = if selected {
         theme.bg_card_selected
-    } else if response.hovered() {
+    } else if row_hovered {
         theme.bg_card_hover
     } else {
         egui::Color32::TRANSPARENT
