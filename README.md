@@ -115,7 +115,12 @@ cargo fmt --check
 cargo test
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide.
+Working on michi:
+
+- [CLAUDE.md](CLAUDE.md) — instructions for AI agents and the contract this
+  repo holds itself to (TDD, clean code, design system, gotchas).
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR flow.
+- [DESIGN_SYSTEM.md](DESIGN_SYSTEM.md) — tokens, UI patterns, egui gotchas.
 
 ## Tech stack
 

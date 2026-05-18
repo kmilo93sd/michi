@@ -13,6 +13,7 @@ pub enum ModalAction {
     None,
     Cancel,
     Submit,
+    PickWorkspace,
 }
 
 #[derive(Debug, Clone)]
@@ -70,24 +71,31 @@ pub fn show(
     let modal_response = egui::Modal::new(egui::Id::new("new_job_modal"))
         .frame(frame)
         .show(ctx, |ui| {
-            ui.set_min_width(420.0);
-            ui.set_max_width(560.0);
+            ui.style_mut().visuals = theme.build_visuals();
+            // Hacer todos los widgets (TextEdit, ComboBox, Button) mas grandes y
+            // con respiro. Aplica solo dentro del modal.
+            ui.spacing_mut().interact_size = egui::vec2(0.0, 36.0);
+            ui.spacing_mut().button_padding = egui::vec2(14.0, 10.0);
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+
+            ui.set_min_width(480.0);
+            ui.set_max_width(620.0);
 
             render_header(ui, &mut action, creating);
-            ui.add_space(12.0);
+            ui.add_space(16.0);
 
             ui.add_enabled_ui(!creating, |ui| {
-                render_workspace_select(ui, state, workspaces, theme);
-                ui.add_space(10.0);
+                render_workspace_select(ui, state, workspaces, theme, &mut action);
+                ui.add_space(14.0);
 
                 render_repo_select(ui, state, workspaces, theme);
-                ui.add_space(10.0);
+                ui.add_space(14.0);
 
                 render_branch_input(ui, state, theme);
-                ui.add_space(10.0);
+                ui.add_space(14.0);
 
                 render_base_branch_input(ui, state, theme);
-                ui.add_space(10.0);
+                ui.add_space(14.0);
 
                 render_initial_task_input(ui, state, theme);
             });
@@ -136,12 +144,30 @@ fn render_workspace_select(
     state: &mut NewJobModalState,
     workspaces: &[Workspace],
     theme: &Theme,
+    action: &mut ModalAction,
 ) {
     ui.label(
         egui::RichText::new("Workspace")
-            .small()
-            .color(theme.text_muted),
+            .strong()
+            .color(theme.text_primary),
     );
+    ui.add_space(4.0);
+
+    if workspaces.is_empty() {
+        if ui
+            .add_sized(
+                [ui.available_width(), 40.0],
+                egui::Button::new("+ Anadir workspace"),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Selecciona la carpeta padre donde estan tus repos")
+            .clicked()
+        {
+            *action = ModalAction::PickWorkspace;
+        }
+        return;
+    }
+
     let selected_label = state
         .workspace_id
         .as_deref()
@@ -153,13 +179,23 @@ fn render_workspace_select(
     egui::ComboBox::from_id_salt("ws_combo")
         .selected_text(selected_label)
         .width(width)
+        .height(360.0)
         .show_ui(ui, |ui| {
+            ui.spacing_mut().interact_size.y = 32.0;
+            ui.spacing_mut().item_spacing.y = 2.0;
             for ws in workspaces {
                 let selected = state.workspace_id.as_deref() == Some(ws.id.as_str());
                 if ui.selectable_label(selected, &ws.name).clicked() {
                     state.workspace_id = Some(ws.id.clone());
                     state.repo_id = None;
                 }
+            }
+            ui.separator();
+            if ui
+                .selectable_label(false, "+ Anadir nuevo workspace...")
+                .clicked()
+            {
+                *action = ModalAction::PickWorkspace;
             }
         });
 }
@@ -170,7 +206,12 @@ fn render_repo_select(
     workspaces: &[Workspace],
     theme: &Theme,
 ) {
-    ui.label(egui::RichText::new("Repo").small().color(theme.text_muted));
+    ui.label(
+        egui::RichText::new("Repo")
+            .strong()
+            .color(theme.text_primary),
+    );
+    ui.add_space(4.0);
 
     let current_ws = state
         .workspace_id
@@ -189,7 +230,10 @@ fn render_repo_select(
         egui::ComboBox::from_id_salt("repo_combo")
             .selected_text(selected_label)
             .width(width)
+            .height(360.0)
             .show_ui(ui, |ui| {
+                ui.spacing_mut().interact_size.y = 32.0;
+                ui.spacing_mut().item_spacing.y = 2.0;
                 if let Some(ws) = current_ws {
                     for repo in &ws.repos {
                         let selected = state.repo_id.as_deref() == Some(repo.id.as_str());
@@ -205,12 +249,14 @@ fn render_repo_select(
 fn render_branch_input(ui: &mut egui::Ui, state: &mut NewJobModalState, theme: &Theme) {
     ui.label(
         egui::RichText::new("Rama nueva")
-            .small()
-            .color(theme.text_muted),
+            .strong()
+            .color(theme.text_primary),
     );
+    ui.add_space(4.0);
     ui.add(
         egui::TextEdit::singleline(&mut state.branch)
             .desired_width(f32::INFINITY)
+            .margin(egui::Margin::symmetric(10, 8))
             .hint_text("feat/cors-fix"),
     );
     if !state.branch.is_empty() && !state.branch_valid() {
@@ -224,24 +270,32 @@ fn render_branch_input(ui: &mut egui::Ui, state: &mut NewJobModalState, theme: &
 fn render_base_branch_input(ui: &mut egui::Ui, state: &mut NewJobModalState, theme: &Theme) {
     ui.label(
         egui::RichText::new("Se crea desde")
-            .small()
-            .color(theme.text_muted),
+            .strong()
+            .color(theme.text_primary),
     );
-    ui.add(egui::TextEdit::singleline(&mut state.base_branch).desired_width(f32::INFINITY));
+    ui.add_space(4.0);
+    ui.add(
+        egui::TextEdit::singleline(&mut state.base_branch)
+            .desired_width(f32::INFINITY)
+            .margin(egui::Margin::symmetric(10, 8)),
+    );
 }
 
 fn render_initial_task_input(ui: &mut egui::Ui, state: &mut NewJobModalState, theme: &Theme) {
     ui.label(
         egui::RichText::new("Tarea inicial (opcional)")
-            .small()
-            .color(theme.text_muted),
+            .strong()
+            .color(theme.text_primary),
     );
+    ui.add_space(4.0);
     ui.add(
         egui::TextEdit::multiline(&mut state.initial_task)
             .desired_width(f32::INFINITY)
-            .desired_rows(3)
+            .desired_rows(4)
+            .margin(egui::Margin::symmetric(10, 8))
             .hint_text("Arregla el CORS para que use whitelist en vez de '*'"),
     );
+    ui.add_space(4.0);
     ui.small(
         egui::RichText::new("Esto se envia como primer prompt a Claude").color(theme.text_muted),
     );

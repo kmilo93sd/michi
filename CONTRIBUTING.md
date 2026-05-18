@@ -32,6 +32,29 @@ cargo test
 CI runs all three on Linux, macOS and Windows. A PR that fails CI will not be
 merged.
 
+## TDD is mandatory
+
+Every change in this repo follows **red-green-refactor**:
+
+1. **RED.** Write the failing test first, before touching production code. If
+   you are fixing a bug, the new test reproduces the bug and fails.
+2. **GREEN.** Write the minimum code that makes the test pass. No speculative
+   abstractions, no features beyond what the test exercises.
+3. **REFACTOR.** Clean up while keeping every test green.
+
+Derived rules:
+
+- **Every PR adds at least one new test.** No exceptions, bugfixes included.
+- **No commits with broken tests.** `cargo test --all-targets` must pass.
+- **Tests come before production code, not after.** The order is the whole
+  point of TDD.
+- Reasonable exception: pure-visual UI changes (theme tokens, spacings) where
+  there is no logic to assert. These go through manual visual review on the
+  PR screenshot.
+
+If you are an AI agent working on this repo: re-read [CLAUDE.md](./CLAUDE.md)
+section 1 before opening any PR.
+
 ## Code style
 
 These rules are not negotiable. They exist to keep the codebase readable for

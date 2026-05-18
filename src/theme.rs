@@ -148,7 +148,14 @@ impl Theme {
         v.widgets.hovered.weak_bg_fill = self.bg_card_hover;
         v.widgets.active.bg_fill = self.bg_card_selected;
         v.widgets.active.weak_bg_fill = self.bg_card_selected;
-        v.selection.bg_fill = self.accent.linear_multiply(0.4);
+        v.widgets.open.bg_fill = self.bg_card_selected;
+        v.widgets.open.weak_bg_fill = self.bg_card_selected;
+        v.widgets.open.fg_stroke.color = self.text_primary;
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, self.border);
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, self.accent.linear_multiply(0.7));
+        v.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.accent);
+        v.widgets.open.bg_stroke = egui::Stroke::new(1.0, self.accent);
+        v.selection.bg_fill = self.accent.linear_multiply(0.25);
         v.selection.stroke.color = self.accent;
         v.hyperlink_color = self.accent;
         v
