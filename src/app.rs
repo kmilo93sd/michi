@@ -1,13 +1,17 @@
 use std::collections::HashSet;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use eframe::CreationContext;
 use tracing::warn;
 
-use crate::state::{Job, JobStatus, Workspace};
+use crate::state::{AppState, Job, JobStatus, Workspace};
 use crate::theme::Theme;
 use crate::ui::new_job_modal::{self, ModalAction, NewJobModalState};
 use crate::worker::{self, CreateWorktreeRequest, WorkerEvent};
+
+/// Cuánto esperar tras el último cambio antes de persistir el state al disco.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 pub struct App {
     pub workspaces: Vec<Workspace>,
@@ -22,6 +26,7 @@ pub struct App {
     pub last_error: Option<String>,
     worker_tx: Sender<WorkerEvent>,
     worker_rx: Receiver<WorkerEvent>,
+    dirty_since: Option<Instant>,
 }
 
 impl App {
@@ -29,12 +34,13 @@ impl App {
         let theme = Theme::load_or_create_default();
         cc.egui_ctx.set_visuals(theme.build_visuals());
         let (worker_tx, worker_rx) = mpsc::channel();
+        let persisted = AppState::load_or_default();
         Self {
-            workspaces: Vec::new(),
-            jobs: Vec::new(),
-            selected_job_id: None,
-            collapsed_workspaces: HashSet::new(),
-            collapsed_repos: HashSet::new(),
+            workspaces: persisted.workspaces,
+            jobs: persisted.jobs,
+            selected_job_id: persisted.selected_job_id,
+            collapsed_workspaces: persisted.collapsed_workspaces,
+            collapsed_repos: persisted.collapsed_repos,
             theme,
             new_job_modal_open: false,
             new_job_modal_state: NewJobModalState::initial(),
@@ -42,7 +48,36 @@ impl App {
             last_error: None,
             worker_tx,
             worker_rx,
+            dirty_since: None,
         }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty_since = Some(Instant::now());
+    }
+
+    fn snapshot_for_persistence(&self) -> AppState {
+        AppState {
+            workspaces: self.workspaces.clone(),
+            jobs: self.jobs.clone(),
+            selected_job_id: self.selected_job_id.clone(),
+            collapsed_workspaces: self.collapsed_workspaces.clone(),
+            collapsed_repos: self.collapsed_repos.clone(),
+        }
+    }
+
+    fn maybe_persist(&mut self) {
+        let Some(since) = self.dirty_since else {
+            return;
+        };
+        if since.elapsed() < SAVE_DEBOUNCE {
+            return;
+        }
+        let snapshot = self.snapshot_for_persistence();
+        if let Err(e) = snapshot.save() {
+            warn!("no se pudo persistir state.json: {e:#}");
+        }
+        self.dirty_since = None;
     }
 
     fn open_new_job_modal(&mut self) {
@@ -66,6 +101,7 @@ impl App {
                     self.selected_job_id = Some(id);
                     self.last_error = None;
                     self.close_new_job_modal();
+                    self.mark_dirty();
                 }
                 WorkerEvent::WorktreeFailed { message } => {
                     self.last_error = Some(message);
@@ -120,12 +156,14 @@ impl App {
         self.workspaces = Workspace::mock_set();
         self.jobs = Job::mock_set();
         self.selected_job_id = self.jobs.first().map(|j| j.id.clone());
+        self.mark_dirty();
     }
 
     fn clear_jobs(&mut self) {
         self.workspaces.clear();
         self.jobs.clear();
         self.selected_job_id = None;
+        self.mark_dirty();
     }
 
     fn jobs_for_repo(&self, workspace: &str, repo: &str) -> Vec<&Job> {
@@ -140,6 +178,11 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.drain_worker_events(&ctx);
+        self.maybe_persist();
+
+        if self.dirty_since.is_some() {
+            ctx.request_repaint_after(SAVE_DEBOUNCE);
+        }
 
         egui::Panel::bottom("bottom_bar")
             .exact_size(self.theme.bottom_bar_height)
@@ -319,16 +362,19 @@ impl App {
 
         if let Some(id) = clicked_id {
             self.selected_job_id = Some(id);
+            self.mark_dirty();
         }
-        if let Some(id) = toggle_ws
-            && !self.collapsed_workspaces.remove(&id)
-        {
-            self.collapsed_workspaces.insert(id);
+        if let Some(id) = toggle_ws {
+            if !self.collapsed_workspaces.remove(&id) {
+                self.collapsed_workspaces.insert(id);
+            }
+            self.mark_dirty();
         }
-        if let Some(id) = toggle_repo
-            && !self.collapsed_repos.remove(&id)
-        {
-            self.collapsed_repos.insert(id);
+        if let Some(id) = toggle_repo {
+            if !self.collapsed_repos.remove(&id) {
+                self.collapsed_repos.insert(id);
+            }
+            self.mark_dirty();
         }
     }
 }
