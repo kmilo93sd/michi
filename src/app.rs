@@ -1,10 +1,13 @@
 use std::collections::HashSet;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use eframe::CreationContext;
+use tracing::warn;
 
 use crate::state::{Job, JobStatus, Workspace};
 use crate::theme::Theme;
 use crate::ui::new_job_modal::{self, ModalAction, NewJobModalState};
+use crate::worker::{self, CreateWorktreeRequest, WorkerEvent};
 
 pub struct App {
     pub workspaces: Vec<Workspace>,
@@ -15,12 +18,17 @@ pub struct App {
     pub theme: Theme,
     pub new_job_modal_open: bool,
     pub new_job_modal_state: NewJobModalState,
+    pub creating_worktree: bool,
+    pub last_error: Option<String>,
+    worker_tx: Sender<WorkerEvent>,
+    worker_rx: Receiver<WorkerEvent>,
 }
 
 impl App {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         let theme = Theme::load_or_create_default();
         cc.egui_ctx.set_visuals(theme.build_visuals());
+        let (worker_tx, worker_rx) = mpsc::channel();
         Self {
             workspaces: Vec::new(),
             jobs: Vec::new(),
@@ -30,16 +38,70 @@ impl App {
             theme,
             new_job_modal_open: false,
             new_job_modal_state: NewJobModalState::initial(),
+            creating_worktree: false,
+            last_error: None,
+            worker_tx,
+            worker_rx,
         }
     }
 
     fn open_new_job_modal(&mut self) {
         self.new_job_modal_state = NewJobModalState::initial();
+        self.last_error = None;
         self.new_job_modal_open = true;
     }
 
     fn close_new_job_modal(&mut self) {
         self.new_job_modal_open = false;
+    }
+
+    /// Drena los eventos del worker que llegaron desde el último frame.
+    fn drain_worker_events(&mut self, ctx: &egui::Context) {
+        while let Ok(event) = self.worker_rx.try_recv() {
+            self.creating_worktree = false;
+            match event {
+                WorkerEvent::WorktreeCreated(job) => {
+                    let id = job.id.clone();
+                    self.jobs.push(job);
+                    self.selected_job_id = Some(id);
+                    self.last_error = None;
+                    self.close_new_job_modal();
+                }
+                WorkerEvent::WorktreeFailed { message } => {
+                    self.last_error = Some(message);
+                }
+            }
+            ctx.request_repaint();
+        }
+    }
+
+    fn submit_new_job(&mut self) {
+        let request = match self.build_create_request() {
+            Some(r) => r,
+            None => {
+                warn!("submit_new_job sin workspace/repo valido");
+                return;
+            }
+        };
+        self.creating_worktree = true;
+        self.last_error = None;
+        worker::spawn_create_worktree(request, self.worker_tx.clone());
+    }
+
+    fn build_create_request(&self) -> Option<CreateWorktreeRequest> {
+        let state = &self.new_job_modal_state;
+        let ws_id = state.workspace_id.as_deref()?;
+        let repo_id = state.repo_id.as_deref()?;
+        let workspace = self.workspaces.iter().find(|w| w.id == ws_id)?;
+        let repo = workspace.repos.iter().find(|r| r.id == repo_id)?;
+        Some(CreateWorktreeRequest {
+            workspace_name: workspace.name.clone(),
+            workspace_path: workspace.path.clone(),
+            repo_name: repo.name.clone(),
+            repo_path: repo.path.clone(),
+            branch: state.branch.clone(),
+            base_branch: state.base_branch.clone(),
+        })
     }
 
     pub fn selected_job(&self) -> Option<&Job> {
@@ -76,6 +138,9 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.drain_worker_events(&ctx);
+
         egui::Panel::bottom("bottom_bar")
             .exact_size(self.theme.bottom_bar_height)
             .frame(
@@ -184,15 +249,17 @@ impl eframe::App for App {
                 &mut self.new_job_modal_state,
                 &self.workspaces,
                 &self.theme,
+                self.creating_worktree,
+                self.last_error.as_deref(),
             );
             match action {
                 ModalAction::Submit => {
-                    // TODO Fase 3 Bloque G: wire al git/worktree.rs y crear Job real.
-                    // Hoy solo cerramos el modal.
-                    self.close_new_job_modal();
+                    self.submit_new_job();
                 }
                 ModalAction::Cancel => {
-                    self.close_new_job_modal();
+                    if !self.creating_worktree {
+                        self.close_new_job_modal();
+                    }
                 }
                 ModalAction::None => {}
             }
