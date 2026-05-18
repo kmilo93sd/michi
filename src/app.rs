@@ -934,7 +934,10 @@ impl App {
                 for ws in &workspaces {
                     ui.add_space(8.0);
                     let ws_collapsed = self.collapsed_workspaces.contains(&ws.id);
-                    let ws_outcome = workspace_header(ui, &self.theme, ws, ws_collapsed);
+                    // Un solo inspect por workspace por frame. Lo reusamos
+                    // para el check verde del header y el banner de bare.
+                    let status = workspace_prep::inspect(&ws.path);
+                    let ws_outcome = workspace_header(ui, &self.theme, ws, &status, ws_collapsed);
                     if ws_outcome.toggle_clicked {
                         toggle_ws = Some(ws.id.clone());
                     }
@@ -950,17 +953,13 @@ impl App {
                         workspace_menu_pick = Some((ws.clone(), pick));
                     }
 
-                    // Banner "Preparar workspace" si el workspace esta pelado
-                    // (sin CLAUDE.md / .claude / .mcp.json) y el usuario no lo
-                    // descarto. Filechecks son baratos (4 stats); cacheariamos
-                    // si esto creciera.
-                    if !ws.prep_dismissed {
-                        let status = workspace_prep::inspect(&ws.path);
-                        if status.is_bare()
-                            && let Some(action) = prep_banner(ui, &self.theme)
-                        {
-                            prep_action_for = Some((ws.id.clone(), action));
-                        }
+                    // Banner "Preparar workspace" si esta bare y el usuario
+                    // no lo descarto.
+                    if !ws.prep_dismissed
+                        && status.is_bare()
+                        && let Some(action) = prep_banner(ui, &self.theme)
+                    {
+                        prep_action_for = Some((ws.id.clone(), action));
                     }
 
                     if !ws_collapsed {
@@ -1195,6 +1194,7 @@ fn workspace_header(
     ui: &mut egui::Ui,
     theme: &Theme,
     ws: &Workspace,
+    status: &workspace_prep::WorkspacePreparationStatus,
     collapsed: bool,
 ) -> WorkspaceHeaderOutcome {
     let full_width = ui.available_width();
@@ -1247,9 +1247,10 @@ fn workspace_header(
             .layout(egui::Layout::top_down(egui::Align::LEFT)),
     );
 
-    // Linea 1: chevron + nombre a la izquierda, "+" pegado a la derecha.
-    // El "+" esta SIEMPRE renderizado (sin parpadeo), con color sutil en
-    // idle y accent cuando el row esta hovereado.
+    // Linea 1: chevron + nombre + check de "configurado" a la izquierda,
+    // "+" pegado a la derecha. El "+" esta SIEMPRE renderizado (sin
+    // parpadeo). El check ✓ verde aparece solo cuando el workspace tiene
+    // al menos uno de CLAUDE.md / .claude / .mcp.json (i.e. no es bare).
     let mut play_clicked = false;
     child.horizontal(|ui| {
         ui.label(
@@ -1257,6 +1258,15 @@ fn workspace_header(
                 .small()
                 .color(theme.text_workspace_label),
         );
+        if !status.is_bare() {
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new("\u{2713}")
+                    .small()
+                    .color(theme.status_idle),
+            )
+            .on_hover_text(workspace_status_summary(status));
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if plus_button(ui, theme, row_hovered, "Iniciar trabajo en este workspace") {
                 play_clicked = true;
@@ -1285,6 +1295,36 @@ fn workspace_header(
         play_clicked,
         menu_pick,
     }
+}
+
+/// Resumen humano para el tooltip del check verde "workspace configurado".
+fn workspace_status_summary(status: &workspace_prep::WorkspacePreparationStatus) -> String {
+    let mut parts = Vec::new();
+    if status.has_claude_md {
+        parts.push("CLAUDE.md");
+    }
+    if status.has_claude_dir {
+        parts.push(".claude/");
+    }
+    if status.has_mcp_json {
+        parts.push(".mcp.json");
+    }
+    if status.has_specs_dir {
+        parts.push("specs/");
+    }
+    let detected = if parts.is_empty() {
+        "sin artefactos".to_string()
+    } else {
+        parts.join(" \u{B7} ")
+    };
+    let git_line = if status.has_root_git {
+        "Repo git en root."
+    } else if status.has_child_git_dirs {
+        "Carpeta padre con repos hijos git."
+    } else {
+        "Sin repo git."
+    };
+    format!("Workspace configurado:\n{detected}\n{git_line}")
 }
 
 /// Boton "+" reutilizable: presencia constante, color sutil en idle y accent
