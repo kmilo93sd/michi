@@ -120,7 +120,10 @@ impl Job {
 
 pub fn humanize_elapsed(since: SystemTime) -> String {
     let elapsed = SystemTime::now().duration_since(since).unwrap_or_default();
-    let secs = elapsed.as_secs();
+    humanize_seconds(elapsed.as_secs())
+}
+
+fn humanize_seconds(secs: u64) -> String {
     if secs < 30 {
         "ahora".into()
     } else if secs < 60 * 60 {
@@ -133,6 +136,114 @@ pub fn humanize_elapsed(since: SystemTime) -> String {
             "hace 1 dia".into()
         } else {
             format!("hace {} dias", days)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_under_30_seconds_is_now() {
+        assert_eq!(humanize_seconds(0), "ahora");
+        assert_eq!(humanize_seconds(15), "ahora");
+        assert_eq!(humanize_seconds(29), "ahora");
+    }
+
+    #[test]
+    fn humanize_minutes() {
+        assert_eq!(humanize_seconds(30), "hace 0 min");
+        assert_eq!(humanize_seconds(60), "hace 1 min");
+        assert_eq!(humanize_seconds(15 * 60), "hace 15 min");
+        assert_eq!(humanize_seconds(59 * 60), "hace 59 min");
+    }
+
+    #[test]
+    fn humanize_hours() {
+        assert_eq!(humanize_seconds(60 * 60), "hace 1 h");
+        assert_eq!(humanize_seconds(5 * 60 * 60), "hace 5 h");
+        assert_eq!(humanize_seconds(23 * 60 * 60), "hace 23 h");
+    }
+
+    #[test]
+    fn humanize_one_day_is_singular() {
+        assert_eq!(humanize_seconds(24 * 60 * 60), "hace 1 dia");
+        assert_eq!(humanize_seconds(36 * 60 * 60), "hace 1 dia");
+    }
+
+    #[test]
+    fn humanize_multiple_days_is_plural() {
+        assert_eq!(humanize_seconds(2 * 24 * 60 * 60), "hace 2 dias");
+        assert_eq!(humanize_seconds(7 * 24 * 60 * 60), "hace 7 dias");
+    }
+
+    fn job_with(status: JobStatus, files_changed: u32, last_activity: SystemTime) -> Job {
+        Job {
+            id: "test".into(),
+            workspace: "ws".into(),
+            repo: "repo".into(),
+            branch: "feat/x".into(),
+            worktree_path: PathBuf::new(),
+            status,
+            files_changed,
+            last_activity,
+        }
+    }
+
+    #[test]
+    fn subtitle_needs_attention_says_permiso() {
+        let job = job_with(JobStatus::NeedsAttention, 1, SystemTime::now());
+        assert_eq!(job.subtitle(), "permiso pendiente");
+    }
+
+    #[test]
+    fn subtitle_thinking_mentions_pensando() {
+        let job = job_with(JobStatus::Thinking, 3, SystemTime::now());
+        assert_eq!(job.subtitle(), "3 cambios \u{B7} pensando");
+    }
+
+    #[test]
+    fn subtitle_paused_mentions_pausado() {
+        let job = job_with(
+            JobStatus::Paused,
+            0,
+            SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60),
+        );
+        assert_eq!(job.subtitle(), "pausado \u{B7} hace 2 dias");
+    }
+
+    #[test]
+    fn subtitle_error_mentions_error() {
+        let job = job_with(JobStatus::Error, 4, SystemTime::now());
+        assert_eq!(job.subtitle(), "4 cambios \u{B7} error");
+    }
+
+    #[test]
+    fn subtitle_idle_includes_files_and_elapsed() {
+        let job = job_with(
+            JobStatus::Idle,
+            7,
+            SystemTime::now() - std::time::Duration::from_secs(5 * 60),
+        );
+        assert_eq!(job.subtitle(), "7 cambios \u{B7} hace 5 min");
+    }
+
+    #[test]
+    fn status_dot_has_unique_char_per_variant() {
+        let chars = [
+            JobStatus::Idle.dot(),
+            JobStatus::Thinking.dot(),
+            JobStatus::Paused.dot(),
+            JobStatus::Error.dot(),
+            JobStatus::NeedsAttention.dot(),
+        ];
+        for (i, a) in chars.iter().enumerate() {
+            for (j, b) in chars.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "dot collision at {i} vs {j}");
+                }
+            }
         }
     }
 }
