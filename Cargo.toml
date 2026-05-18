@@ -1,0 +1,29 @@
+[package]
+name = "michi"
+version = "0.1.0"
+edition = "2024"
+authors = ["Camilo Alaniz <kmilo93sd@gmail.com>"]
+description = "Panel de control para gestionar Claude Codes paralelos en worktrees"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1.0.102"
+dirs = "6.0.0"
+eframe = { version = "0.34.2", features = ["default_fonts", "glow"] }
+egui = "0.34.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.52.3", features = ["rt", "macros", "sync", "time", "process", "io-util"] }
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
