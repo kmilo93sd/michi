@@ -1,11 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use eframe::CreationContext;
-use tracing::warn;
+use egui_term::{PtyEvent, TerminalView};
+use tracing::{debug, warn};
 
 use crate::state::{AppState, Job, JobStatus, Workspace};
+use crate::terminal::{self, JobTerminal};
 use crate::theme::Theme;
 use crate::ui::new_job_modal::{self, ModalAction, NewJobModalState};
 use crate::worker::{
@@ -34,6 +36,14 @@ pub struct App {
     status_targets_tx: Sender<Vec<StatusPollTarget>>,
     dirty_since: Option<Instant>,
     close_confirm: Option<CloseConfirm>,
+    /// Un terminal por job-id. Lazy: se crea cuando el job se renderiza por
+    /// primera vez. Drop del backend cierra el PTY automaticamente.
+    terminals: HashMap<String, JobTerminal>,
+    pty_tx: Sender<(u64, PtyEvent)>,
+    pty_rx: Receiver<(u64, PtyEvent)>,
+    /// Contador incremental para asignar id numerico unico a cada
+    /// TerminalBackend (egui_term lo requiere para enrutar eventos).
+    next_backend_id: u64,
 }
 
 /// Estado del modal de confirmacion para cerrar un job con cambios pendientes.
@@ -54,6 +64,7 @@ impl App {
         let theme = Theme::load_or_create_default();
         cc.egui_ctx.set_visuals(theme.build_visuals());
         let (worker_tx, worker_rx) = mpsc::channel();
+        let (pty_tx, pty_rx) = mpsc::channel();
         let status_targets_tx =
             worker::spawn_status_poller(worker_tx.clone(), STATUS_POLL_INTERVAL);
         let persisted = AppState::load_or_default();
@@ -73,9 +84,58 @@ impl App {
             status_targets_tx,
             dirty_since: None,
             close_confirm: None,
+            terminals: HashMap::new(),
+            pty_tx,
+            pty_rx,
+            next_backend_id: 1,
         };
         app.push_status_targets();
         app
+    }
+
+    /// Crea (lazy) el terminal asociado al job. Si la creacion falla
+    /// (working_directory invalido, etc), guarda el error en `last_error`
+    /// y devuelve `None`.
+    fn ensure_terminal_for(
+        &mut self,
+        ctx: &egui::Context,
+        job_id: &str,
+    ) -> Option<&mut JobTerminal> {
+        if !self.terminals.contains_key(job_id) {
+            let job = self.jobs.iter().find(|j| j.id == job_id)?.clone();
+            let backend_id = self.next_backend_id;
+            self.next_backend_id += 1;
+            match JobTerminal::spawn(
+                backend_id,
+                ctx.clone(),
+                self.pty_tx.clone(),
+                &terminal::default_shell(),
+                vec![],
+                &job.worktree_path,
+            ) {
+                Ok(t) => {
+                    self.terminals.insert(job_id.to_string(), t);
+                }
+                Err(e) => {
+                    warn!("no se pudo spawnear terminal para job {job_id}: {e:#}");
+                    self.last_error = Some(format!("terminal: {e:#}"));
+                    return None;
+                }
+            }
+        }
+        self.terminals.get_mut(job_id)
+    }
+
+    /// Drena eventos PTY. Hoy solo loguea y limpia backends muertos; en
+    /// bloques siguientes parsea patrones del output para actualizar
+    /// JobStatus (idle/thinking/needs-attention).
+    fn drain_pty_events(&mut self) {
+        while let Ok((backend_id, event)) = self.pty_rx.try_recv() {
+            debug!(backend_id, ?event, "pty event");
+            if matches!(event, PtyEvent::Exit) {
+                self.terminals.retain(|_, t| t.backend.id() != backend_id);
+            }
+        }
     }
 
     fn push_status_targets(&self) {
@@ -386,6 +446,7 @@ impl eframe::App for App {
         ctx.set_visuals(self.theme.build_visuals());
 
         self.drain_worker_events(&ctx);
+        self.drain_pty_events();
         self.maybe_persist();
 
         if self.dirty_since.is_some() {
@@ -476,6 +537,7 @@ impl eframe::App for App {
                 }
             });
 
+        let selected_id = self.selected_job_id.clone();
         let mut empty_state_create_clicked = false;
         let mut close_clicked: Option<String> = None;
         egui::CentralPanel::default()
@@ -483,10 +545,8 @@ impl eframe::App for App {
             .show_inside(ui, |ui| {
                 if self.jobs.is_empty() {
                     empty_state_create_clicked = render_empty_state(ui);
-                } else if let Some(job) = self.selected_job() {
-                    if render_job_pane(ui, job, &self.theme).close_clicked {
-                        close_clicked = Some(job.id.clone());
-                    }
+                } else if let Some(id) = selected_id {
+                    close_clicked = self.render_selected_job(ui, &id);
                 } else {
                     ui.centered_and_justified(|ui| {
                         ui.label("Selecciona un trabajo de la barra lateral");
@@ -530,6 +590,37 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Render del job seleccionado: header + terminal embebido. Devuelve el
+    /// id del job si el usuario hizo click en X (para que el caller dispare
+    /// el close flow).
+    fn render_selected_job(&mut self, ui: &mut egui::Ui, job_id: &str) -> Option<String> {
+        let job = self.jobs.iter().find(|j| j.id == job_id).cloned()?;
+
+        let outcome = render_job_header(ui, &job, &self.theme);
+
+        let ctx = ui.ctx().clone();
+        match self.ensure_terminal_for(&ctx, job_id) {
+            Some(terminal) => {
+                let size = ui.available_size();
+                let view = TerminalView::new(ui, &mut terminal.backend)
+                    .set_focus(true)
+                    .set_size(size);
+                ui.add(view);
+            }
+            None => {
+                let rect = ui.available_rect_before_wrap();
+                ui.painter().rect_filled(rect, 0.0, self.theme.bg_base);
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("terminal no disponible — ver logs")
+                        .color(self.theme.status_error),
+                );
+            }
+        }
+
+        outcome.close_clicked.then(|| job.id.clone())
+    }
+
     fn render_sidebar_tree(&mut self, ui: &mut egui::Ui) {
         let mut clicked_id: Option<String> = None;
         let mut toggle_ws: Option<String> = None;
@@ -792,7 +883,7 @@ struct JobPaneOutcome {
     close_clicked: bool,
 }
 
-fn render_job_pane(ui: &mut egui::Ui, job: &Job, theme: &Theme) -> JobPaneOutcome {
+fn render_job_header(ui: &mut egui::Ui, job: &Job, theme: &Theme) -> JobPaneOutcome {
     let mut outcome = JobPaneOutcome {
         close_clicked: false,
     };
@@ -825,10 +916,5 @@ fn render_job_pane(ui: &mut egui::Ui, job: &Job, theme: &Theme) -> JobPaneOutcom
                 });
             });
         });
-
-    let rect = ui.available_rect_before_wrap();
-    ui.painter().rect_filled(rect, 0.0, theme.bg_base);
-    ui.add_space(12.0);
-    ui.label(egui::RichText::new("terminal placeholder (Fase 4)").color(theme.text_muted));
     outcome
 }
