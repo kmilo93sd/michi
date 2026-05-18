@@ -129,6 +129,26 @@ impl Workspace {
     }
 }
 
+/// Quita el workspace con `workspace_id` de `workspaces` y devuelve la lista
+/// de IDs de jobs cuyo `workspace` matcheaba el workspace removido. El caller
+/// usa esa lista para limpiar `App.jobs` y los terminales asociados.
+///
+/// Si no hay workspace con ese id, no hace nada y devuelve un vector vacio.
+pub fn remove_workspace(
+    workspaces: &mut Vec<Workspace>,
+    jobs: &[crate::state::Job],
+    workspace_id: &str,
+) -> Vec<String> {
+    let Some(removed_idx) = workspaces.iter().position(|w| w.id == workspace_id) else {
+        return Vec::new();
+    };
+    let removed = workspaces.remove(removed_idx);
+    jobs.iter()
+        .filter(|j| j.workspace == removed.name)
+        .map(|j| j.id.clone())
+        .collect()
+}
+
 fn count_subdirs(path: &Path) -> usize {
     match std::fs::read_dir(path) {
         Ok(entries) => entries.flatten().filter(|e| e.path().is_dir()).count(),
@@ -249,6 +269,55 @@ mod tests {
             workspace.skills_count, 6,
             "el agregado del workspace debe sumar workspace + repos"
         );
+    }
+
+    #[test]
+    fn remove_workspace_drops_it_and_returns_affected_job_ids() {
+        let mut workspaces = vec![
+            Workspace::from_path(&PathBuf::from("/tmp/ws-a")),
+            Workspace::from_path(&PathBuf::from("/tmp/ws-b")),
+        ];
+        workspaces[0].name = "alpha".into();
+        workspaces[1].name = "beta".into();
+        let ws_a_id = workspaces[0].id.clone();
+
+        let jobs = vec![
+            crate::state::Job {
+                id: "job-1".into(),
+                workspace: "alpha".into(),
+                repo: "repo-a".into(),
+                branch: "feat/x".into(),
+                worktree_path: PathBuf::from("/tmp/wt-x"),
+                status: crate::state::JobStatus::Idle,
+                files_changed: 0,
+                last_activity: std::time::SystemTime::now(),
+            },
+            crate::state::Job {
+                id: "job-2".into(),
+                workspace: "beta".into(),
+                repo: "repo-b".into(),
+                branch: "feat/y".into(),
+                worktree_path: PathBuf::from("/tmp/wt-y"),
+                status: crate::state::JobStatus::Idle,
+                files_changed: 0,
+                last_activity: std::time::SystemTime::now(),
+            },
+        ];
+
+        let affected = super::remove_workspace(&mut workspaces, &jobs, &ws_a_id);
+
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].name, "beta");
+        assert_eq!(affected, vec!["job-1".to_string()]);
+    }
+
+    #[test]
+    fn remove_workspace_with_unknown_id_is_noop() {
+        let mut workspaces = vec![Workspace::from_path(&PathBuf::from("/tmp/ws"))];
+        let jobs = vec![];
+        let affected = super::remove_workspace(&mut workspaces, &jobs, "ws-does-not-exist");
+        assert_eq!(workspaces.len(), 1);
+        assert!(affected.is_empty());
     }
 
     #[test]

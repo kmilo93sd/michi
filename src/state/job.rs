@@ -143,6 +143,15 @@ impl Job {
         ]
     }
 
+    /// Una "sesion in-place" es una sesion directa de repo o de workspace:
+    /// no hay un git worktree dedicado, asi que el flujo de cerrar el job
+    /// debe limitarse a quitar la entrada de memoria (no llamar a
+    /// `git worktree remove`). Se detecta por la convencion de marcar la
+    /// branch con un nombre entre parentesis.
+    pub fn is_in_place_session(&self) -> bool {
+        self.branch == "(directo)" || self.branch == "(workspace)"
+    }
+
     pub fn subtitle(&self) -> String {
         match self.status {
             JobStatus::NeedsAttention => "permiso pendiente".into(),
@@ -323,6 +332,20 @@ mod tests {
         let a = Job::for_direct_session("ws", "repo", &path);
         let b = Job::for_direct_session("ws", "repo", &path);
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn is_in_place_session_true_for_direct_and_workspace() {
+        let direct = Job::for_direct_session("ws", "repo", &PathBuf::from("/r"));
+        let workspace = Job::for_workspace_session("ws", &PathBuf::from("/w"));
+        assert!(direct.is_in_place_session());
+        assert!(workspace.is_in_place_session());
+    }
+
+    #[test]
+    fn is_in_place_session_false_for_real_worktree() {
+        let job = job_with(JobStatus::Idle, 0, SystemTime::now());
+        assert!(!job.is_in_place_session());
     }
 
     #[test]

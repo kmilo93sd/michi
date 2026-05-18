@@ -8,6 +8,7 @@
 pub mod app;
 pub mod git;
 pub mod state;
+pub mod system;
 pub mod terminal;
 pub mod theme;
 pub mod ui;
