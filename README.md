@@ -1,7 +1,13 @@
-# michi
+<p align="center">
+  <img src="assets/logo.svg" width="120" alt="michi logo" />
+</p>
 
-> A native Rust control panel for running multiple Claude Code instances in parallel,
-> each in its own isolated `git worktree`.
+<h1 align="center">michi</h1>
+
+<p align="center">
+  A native Rust control panel for running multiple Claude Code instances in
+  parallel, each in its own isolated <code>git worktree</code>.
+</p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](#status)

@@ -1,18 +1,19 @@
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use michi::app;
+
+const ICON_PNG: &[u8] = include_bytes!("../assets/icon-256.png");
 
 fn main() -> Result<()> {
     let _log_guard = init_tracing().context("inicializando tracing")?;
     info!("michi starting up");
 
+    let viewport = build_viewport();
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("michi")
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([800.0, 600.0]),
+        viewport,
         ..Default::default()
     };
 
@@ -24,6 +25,32 @@ fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("eframe error: {e}"))?;
 
     Ok(())
+}
+
+fn build_viewport() -> egui::ViewportBuilder {
+    let mut builder = egui::ViewportBuilder::default()
+        .with_title("michi")
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([800.0, 600.0]);
+
+    match load_icon() {
+        Ok(icon) => builder = builder.with_icon(icon),
+        Err(e) => warn!("no se pudo cargar el icono embebido: {e:#}"),
+    }
+
+    builder
+}
+
+fn load_icon() -> Result<egui::IconData> {
+    let img = image::load_from_memory_with_format(ICON_PNG, image::ImageFormat::Png)
+        .context("decodificando icon-256.png")?
+        .into_rgba8();
+    let (width, height) = img.dimensions();
+    Ok(egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    })
 }
 
 fn init_tracing() -> Result<WorkerGuard> {

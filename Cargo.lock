@@ -1834,6 +1834,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "image",
  "serde",
  "serde_json",
  "tempfile",
