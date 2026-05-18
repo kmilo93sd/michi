@@ -4,6 +4,7 @@ use eframe::CreationContext;
 
 use crate::state::{Job, JobStatus, Workspace};
 use crate::theme::Theme;
+use crate::ui::new_job_modal::{self, ModalAction, NewJobModalState};
 
 pub struct App {
     pub workspaces: Vec<Workspace>,
@@ -12,6 +13,8 @@ pub struct App {
     pub collapsed_workspaces: HashSet<String>,
     pub collapsed_repos: HashSet<String>,
     pub theme: Theme,
+    pub new_job_modal_open: bool,
+    pub new_job_modal_state: NewJobModalState,
 }
 
 impl App {
@@ -25,7 +28,18 @@ impl App {
             collapsed_workspaces: HashSet::new(),
             collapsed_repos: HashSet::new(),
             theme,
+            new_job_modal_open: false,
+            new_job_modal_state: NewJobModalState::initial(),
         }
+    }
+
+    fn open_new_job_modal(&mut self) {
+        self.new_job_modal_state = NewJobModalState::initial();
+        self.new_job_modal_open = true;
+    }
+
+    fn close_new_job_modal(&mut self) {
+        self.new_job_modal_open = false;
     }
 
     pub fn selected_job(&self) -> Option<&Job> {
@@ -118,7 +132,7 @@ impl eframe::App for App {
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
-                    // TODO Fase 3: abrir modal nuevo trabajo
+                    self.open_new_job_modal();
                 }
                 ui.add_space(10.0);
 
@@ -146,11 +160,12 @@ impl eframe::App for App {
                 }
             });
 
+        let mut empty_state_create_clicked = false;
         egui::CentralPanel::default()
             .frame(self.theme.base_panel_frame())
             .show_inside(ui, |ui| {
                 if self.jobs.is_empty() {
-                    render_empty_state(ui);
+                    empty_state_create_clicked = render_empty_state(ui);
                 } else if let Some(job) = self.selected_job() {
                     render_job_pane(ui, job, &self.theme);
                 } else {
@@ -159,6 +174,29 @@ impl eframe::App for App {
                     });
                 }
             });
+        if empty_state_create_clicked {
+            self.open_new_job_modal();
+        }
+
+        if self.new_job_modal_open {
+            let action = new_job_modal::show(
+                ui.ctx(),
+                &mut self.new_job_modal_state,
+                &self.workspaces,
+                &self.theme,
+            );
+            match action {
+                ModalAction::Submit => {
+                    // TODO Fase 3 Bloque G: wire al git/worktree.rs y crear Job real.
+                    // Hoy solo cerramos el modal.
+                    self.close_new_job_modal();
+                }
+                ModalAction::Cancel => {
+                    self.close_new_job_modal();
+                }
+                ModalAction::None => {}
+            }
+        }
     }
 }
 
@@ -368,7 +406,8 @@ fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool, theme: &Theme) 
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn render_empty_state(ui: &mut egui::Ui) {
+fn render_empty_state(ui: &mut egui::Ui) -> bool {
+    let mut clicked = false;
     ui.vertical_centered(|ui| {
         ui.add_space(96.0);
         ui.heading("Sin trabajos todavia");
@@ -381,12 +420,17 @@ fn render_empty_state(ui: &mut egui::Ui) {
             .weak(),
         );
         ui.add_space(24.0);
-        let _ = ui
+        if ui
             .add_sized([220.0, 36.0], egui::Button::new("+ Crear primer trabajo"))
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            clicked = true;
+        }
         ui.add_space(8.0);
         ui.small(egui::RichText::new("o Ctrl+N").weak());
     });
+    clicked
 }
 
 fn render_job_pane(ui: &mut egui::Ui, job: &Job, theme: &Theme) {
