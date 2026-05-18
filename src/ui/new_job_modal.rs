@@ -56,6 +56,8 @@ pub fn show(
     state: &mut NewJobModalState,
     workspaces: &[Workspace],
     theme: &Theme,
+    creating: bool,
+    last_error: Option<&str>,
 ) -> ModalAction {
     let mut action = ModalAction::None;
 
@@ -71,46 +73,58 @@ pub fn show(
             ui.set_min_width(420.0);
             ui.set_max_width(560.0);
 
-            render_header(ui, &mut action);
+            render_header(ui, &mut action, creating);
             ui.add_space(12.0);
 
-            render_workspace_select(ui, state, workspaces, theme);
-            ui.add_space(10.0);
+            ui.add_enabled_ui(!creating, |ui| {
+                render_workspace_select(ui, state, workspaces, theme);
+                ui.add_space(10.0);
 
-            render_repo_select(ui, state, workspaces, theme);
-            ui.add_space(10.0);
+                render_repo_select(ui, state, workspaces, theme);
+                ui.add_space(10.0);
 
-            render_branch_input(ui, state, theme);
-            ui.add_space(10.0);
+                render_branch_input(ui, state, theme);
+                ui.add_space(10.0);
 
-            render_base_branch_input(ui, state, theme);
-            ui.add_space(10.0);
+                render_base_branch_input(ui, state, theme);
+                ui.add_space(10.0);
 
-            render_initial_task_input(ui, state, theme);
+                render_initial_task_input(ui, state, theme);
+            });
+
+            if let Some(err) = last_error {
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new(format!("Error: {err}"))
+                        .small()
+                        .color(theme.status_error),
+                );
+            }
+
             ui.add_space(16.0);
-
-            render_footer(ui, state, &mut action);
+            render_footer(ui, state, &mut action, creating);
         });
 
-    if modal_response.backdrop_response.clicked() {
-        action = ModalAction::Cancel;
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        action = ModalAction::Cancel;
+    if !creating {
+        if modal_response.backdrop_response.clicked() {
+            action = ModalAction::Cancel;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            action = ModalAction::Cancel;
+        }
     }
 
     action
 }
 
-fn render_header(ui: &mut egui::Ui, action: &mut ModalAction) {
+fn render_header(ui: &mut egui::Ui, action: &mut ModalAction, creating: bool) {
     ui.horizontal(|ui| {
         ui.heading("Nuevo trabajo");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("X")
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
+            let close_btn = ui
+                .add_enabled(!creating, egui::Button::new("X").small())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if close_btn.clicked() {
                 *action = ModalAction::Cancel;
             }
         });
@@ -233,12 +247,18 @@ fn render_initial_task_input(ui: &mut egui::Ui, state: &mut NewJobModalState, th
     );
 }
 
-fn render_footer(ui: &mut egui::Ui, state: &NewJobModalState, action: &mut ModalAction) {
+fn render_footer(
+    ui: &mut egui::Ui,
+    state: &NewJobModalState,
+    action: &mut ModalAction,
+    creating: bool,
+) {
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let enabled = state.is_valid();
+            let label = if creating { "Creando..." } else { "Crear" };
+            let enabled = !creating && state.is_valid();
             if ui
-                .add_enabled(enabled, egui::Button::new("Crear"))
+                .add_enabled(enabled, egui::Button::new(label))
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
@@ -246,7 +266,7 @@ fn render_footer(ui: &mut egui::Ui, state: &NewJobModalState, action: &mut Modal
             }
             ui.add_space(8.0);
             if ui
-                .button("Cancelar")
+                .add_enabled(!creating, egui::Button::new("Cancelar"))
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
