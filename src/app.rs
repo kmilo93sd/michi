@@ -26,7 +26,6 @@ pub struct App {
     pub jobs: Vec<Job>,
     pub selected_job_id: Option<String>,
     pub collapsed_workspaces: HashSet<String>,
-    pub collapsed_repos: HashSet<String>,
     pub theme: Theme,
     pub new_job_modal_open: bool,
     pub new_job_modal_state: NewJobModalState,
@@ -95,14 +94,6 @@ enum WorkspaceMenu {
     Remove,
 }
 
-/// Acciones del menu contextual de un repo en sidebar.
-#[derive(Clone, Copy)]
-enum RepoMenu {
-    DirectSession,
-    NewWorktree,
-    OpenFolder,
-}
-
 /// Acciones del menu contextual de una card de job en sidebar.
 #[derive(Clone, Copy)]
 enum JobMenu {
@@ -125,7 +116,6 @@ impl App {
             jobs: persisted.jobs,
             selected_job_id: persisted.selected_job_id,
             collapsed_workspaces: persisted.collapsed_workspaces,
-            collapsed_repos: persisted.collapsed_repos,
             theme,
             new_job_modal_open: false,
             new_job_modal_state: NewJobModalState::initial(),
@@ -538,7 +528,6 @@ impl App {
             jobs: self.jobs.clone(),
             selected_job_id: self.selected_job_id.clone(),
             collapsed_workspaces: self.collapsed_workspaces.clone(),
-            collapsed_repos: self.collapsed_repos.clone(),
         }
     }
 
@@ -684,10 +673,10 @@ impl App {
         self.mark_dirty();
     }
 
-    fn jobs_for_repo(&self, workspace: &str, repo: &str) -> Vec<&Job> {
+    fn jobs_for_workspace(&self, workspace: &str) -> Vec<&Job> {
         self.jobs
             .iter()
-            .filter(|j| j.workspace == workspace && j.repo == repo)
+            .filter(|j| j.workspace == workspace)
             .collect()
     }
 }
@@ -886,15 +875,13 @@ impl App {
     fn render_sidebar_tree(&mut self, ui: &mut egui::Ui) {
         let mut clicked_id: Option<String> = None;
         let mut toggle_ws: Option<String> = None;
-        let mut toggle_repo: Option<String> = None;
         let mut add_workspace_clicked = false;
         let mut start_choice_for: Option<StartChoice> = None;
         let mut workspace_menu_pick: Option<(Workspace, WorkspaceMenu)> = None;
-        let mut repo_menu_pick: Option<RepoMenuPick> = None;
         let mut job_menu_pick: Option<(String, JobMenu)> = None;
 
         // Clone para evitar lifetime acrobatics: el loop necesita iterar workspaces
-        // y simultaneamente leer self.collapsed_workspaces y jobs_for_repo.
+        // y simultaneamente leer self.collapsed_workspaces y jobs_for_workspace.
         let workspaces = self.workspaces.clone();
 
         egui::ScrollArea::vertical()
@@ -920,52 +907,27 @@ impl App {
                     }
 
                     if !ws_collapsed {
-                        for repo in &ws.repos {
-                            let repo_collapsed = self.collapsed_repos.contains(&repo.id);
-                            let repo_jobs = self.jobs_for_repo(&ws.name, &repo.name);
-
-                            let header_outcome = repo_header(
-                                ui,
-                                &self.theme,
-                                &repo.name,
-                                repo_collapsed,
-                                repo_jobs.len(),
-                            );
-                            if header_outcome.toggle_clicked {
-                                toggle_repo = Some(repo.id.clone());
-                            }
-                            if header_outcome.play_clicked {
-                                start_choice_for = Some(StartChoice {
-                                    workspace_id: ws.id.clone(),
-                                    workspace_name: ws.name.clone(),
-                                    workspace_path: ws.path.clone(),
-                                    repo: Some(RepoChoice {
-                                        id: repo.id.clone(),
-                                        name: repo.name.clone(),
-                                        path: repo.path.clone(),
-                                    }),
-                                });
-                            }
-
-                            if !repo_collapsed {
-                                for job in repo_jobs {
-                                    let selected = self.selected_job_id.as_deref() == Some(&job.id);
-                                    let outcome = render_job_card(ui, job, selected, &self.theme);
-                                    if outcome.clicked {
-                                        clicked_id = Some(job.id.clone());
-                                    }
-                                    if let Some(pick) = outcome.menu_pick {
-                                        job_menu_pick = Some((job.id.clone(), pick));
-                                    }
+                        let ws_jobs = self.jobs_for_workspace(&ws.name);
+                        if ws_jobs.is_empty() {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(self.theme.tree_line_ws_x + 8.0);
+                                ui.small(
+                                    egui::RichText::new("Sin trabajos activos")
+                                        .color(self.theme.text_muted),
+                                );
+                            });
+                            ui.add_space(4.0);
+                        } else {
+                            for job in ws_jobs {
+                                let selected = self.selected_job_id.as_deref() == Some(&job.id);
+                                let outcome = render_job_card(ui, job, selected, &self.theme);
+                                if outcome.clicked {
+                                    clicked_id = Some(job.id.clone());
                                 }
-                            }
-                            if let Some(pick) = header_outcome.menu_pick {
-                                repo_menu_pick = Some(RepoMenuPick {
-                                    workspace_id: ws.id.clone(),
-                                    workspace_name: ws.name.clone(),
-                                    repo: repo.clone(),
-                                    action: pick,
-                                });
+                                if let Some(pick) = outcome.menu_pick {
+                                    job_menu_pick = Some((job.id.clone(), pick));
+                                }
                             }
                         }
                     }
@@ -1027,12 +989,6 @@ impl App {
             }
             self.mark_dirty();
         }
-        if let Some(id) = toggle_repo {
-            if !self.collapsed_repos.remove(&id) {
-                self.collapsed_repos.insert(id);
-            }
-            self.mark_dirty();
-        }
         if add_workspace_clicked {
             self.pick_and_add_workspace();
         }
@@ -1041,9 +997,6 @@ impl App {
         }
         if let Some((ws, action)) = workspace_menu_pick {
             self.handle_workspace_menu(&ws, action);
-        }
-        if let Some(pick) = repo_menu_pick {
-            self.handle_repo_menu(pick);
         }
         if let Some((job_id, action)) = job_menu_pick {
             self.handle_job_menu(&job_id, action);
@@ -1081,22 +1034,6 @@ impl App {
         }
     }
 
-    fn handle_repo_menu(&mut self, pick: RepoMenuPick) {
-        match pick.action {
-            RepoMenu::DirectSession => {
-                self.start_direct_session(&pick.workspace_name, &pick.repo.name, &pick.repo.path);
-            }
-            RepoMenu::NewWorktree => {
-                self.open_new_job_modal_for_scope(&pick.workspace_id, Some(&pick.repo.id));
-            }
-            RepoMenu::OpenFolder => {
-                if let Err(e) = system::open_folder(&pick.repo.path) {
-                    self.last_error = Some(format!("no se pudo abrir la carpeta: {e:#}"));
-                }
-            }
-        }
-    }
-
     fn handle_job_menu(&mut self, job_id: &str, action: JobMenu) {
         match action {
             JobMenu::Select => {
@@ -1120,16 +1057,6 @@ impl App {
             }
         }
     }
-}
-
-/// Datos capturados cuando el usuario elige una accion del menu contextual
-/// de un repo. Lo separamos del enum `RepoMenu` para evitar clonar workspace
-/// y repo en cada frame: solo se materializa cuando hubo click derecho.
-struct RepoMenuPick {
-    workspace_id: String,
-    workspace_name: String,
-    repo: crate::state::workspace::Repo,
-    action: RepoMenu,
 }
 
 /// Resultado de interactuar con el header de un workspace.
@@ -1258,89 +1185,6 @@ fn plus_button(ui: &mut egui::Ui, theme: &Theme, row_hovered: bool, tooltip: &st
     resp.clicked()
 }
 
-/// Resultado de interactuar con el header de un repo.
-struct RepoHeaderOutcome {
-    /// El usuario hizo click en el area del header (chevron + nombre) →
-    /// toggle de colapsado.
-    toggle_clicked: bool,
-    /// El usuario hizo click en ▶ → quiere iniciar un trabajo en este repo.
-    play_clicked: bool,
-    /// Accion elegida del menu contextual (click derecho).
-    menu_pick: Option<RepoMenu>,
-}
-
-fn repo_header(
-    ui: &mut egui::Ui,
-    theme: &Theme,
-    name: &str,
-    collapsed: bool,
-    job_count: usize,
-) -> RepoHeaderOutcome {
-    let full_width = ui.available_width();
-    let (rect, area_response) = ui.allocate_exact_size(
-        egui::vec2(full_width, theme.repo_header_height),
-        egui::Sense::click(),
-    );
-
-    let row_hovered = area_response.contains_pointer();
-    if row_hovered {
-        ui.painter().rect_filled(rect, 4.0, theme.bg_card_hover);
-    }
-    let area_response = area_response.on_hover_cursor(egui::CursorIcon::PointingHand);
-
-    paint_tree_line(ui, rect, theme, theme.tree_line_ws_x);
-
-    let mut menu_pick: Option<RepoMenu> = None;
-    area_response.context_menu(|ui| {
-        if ui.button("Sesion directa").clicked() {
-            menu_pick = Some(RepoMenu::DirectSession);
-            ui.close_kind(egui::UiKind::Menu);
-        }
-        if ui.button("Nuevo trabajo (worktree)").clicked() {
-            menu_pick = Some(RepoMenu::NewWorktree);
-            ui.close_kind(egui::UiKind::Menu);
-        }
-        ui.separator();
-        if ui.button("Abrir carpeta").clicked() {
-            menu_pick = Some(RepoMenu::OpenFolder);
-            ui.close_kind(egui::UiKind::Menu);
-        }
-    });
-
-    let chevron = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
-    let inner = rect.shrink2(egui::vec2(22.0, 4.0));
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(inner)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-
-    child.label(egui::RichText::new(format!("{} {}", chevron, name)).color(theme.text_repo_label));
-
-    // Lado derecho: contador (si hay) + boton "+". Layout right_to_left
-    // mantiene ambos pegados al borde derecho del row.
-    let mut play_clicked = false;
-    child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if plus_button(ui, theme, row_hovered, "Iniciar trabajo en este repo") {
-            play_clicked = true;
-        }
-        if job_count > 0 {
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(format!("{}", job_count))
-                    .small()
-                    .color(theme.text_muted),
-            );
-        }
-    });
-
-    RepoHeaderOutcome {
-        toggle_clicked: area_response.clicked(),
-        play_clicked,
-        menu_pick,
-    }
-}
-
 fn paint_tree_line(ui: &egui::Ui, rect: egui::Rect, theme: &Theme, offset_x: f32) {
     let x = rect.min.x + offset_x;
     ui.painter().line_segment(
@@ -1395,18 +1239,29 @@ fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool, theme: &Theme) 
     }
 
     paint_tree_line(ui, rect, theme, theme.tree_line_ws_x);
-    paint_tree_line(ui, rect, theme, theme.tree_line_repo_x);
 
-    let inner = rect.shrink2(egui::vec2(40.0, 6.0));
+    let inner = rect.shrink2(egui::vec2(22.0, 6.0));
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(inner)
             .layout(egui::Layout::top_down(egui::Align::LEFT)),
     );
 
+    // Linea 1: status dot + branch a la izquierda, nombre del repo como tag
+    // discreto a la derecha. Para sesiones in-place (directo/workspace) no
+    // mostramos repo: el `(directo)` / `(workspace)` del branch ya lo aclara.
     child.horizontal(|ui| {
         ui.colored_label(job.status.color(theme), job.status.dot().to_string());
         ui.label(egui::RichText::new(&job.branch).strong());
+        if !job.is_in_place_session() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(&job.repo)
+                        .small()
+                        .color(theme.text_muted),
+                );
+            });
+        }
     });
 
     let subtitle_color = if job.status == JobStatus::NeedsAttention {
@@ -1497,7 +1352,15 @@ fn render_job_header(ui: &mut egui::Ui, job: &Job, theme: &Theme) -> JobPaneOutc
         .exact_size(theme.job_header_height)
         .frame(header_frame)
         .show_inside(ui, |ui| {
-            ui.strong(format!("{} \u{B7} {}", job.repo, job.branch));
+            // Titulo: para sesiones in-place mostramos solo "{workspace} ·
+            // {branch}" (el repo es "(workspace)" o "(directo)" y no aporta).
+            // Para jobs con worktree real, "{repo} · {branch}".
+            let title = if job.is_in_place_session() {
+                format!("{} \u{B7} {}", job.workspace, job.branch)
+            } else {
+                format!("{} \u{B7} {}", job.repo, job.branch)
+            };
+            ui.strong(title);
             ui.label(job.worktree_path.to_string_lossy().replace('\\', "/"));
             ui.horizontal(|ui| {
                 ui.label(format!("{} archivos modificados", job.files_changed));

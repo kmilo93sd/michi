@@ -28,9 +28,6 @@ pub struct AppState {
 
     #[serde(default)]
     pub collapsed_workspaces: HashSet<String>,
-
-    #[serde(default)]
-    pub collapsed_repos: HashSet<String>,
 }
 
 impl AppState {
@@ -123,7 +120,6 @@ mod tests {
             }],
             selected_job_id: Some("job-1".into()),
             collapsed_workspaces: collapsed_ws,
-            collapsed_repos: HashSet::new(),
         }
     }
 
@@ -134,7 +130,6 @@ mod tests {
         assert!(s.jobs.is_empty());
         assert!(s.selected_job_id.is_none());
         assert!(s.collapsed_workspaces.is_empty());
-        assert!(s.collapsed_repos.is_empty());
     }
 
     #[test]
