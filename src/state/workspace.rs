@@ -15,6 +15,10 @@ pub struct Workspace {
     pub specs_count: usize,
     #[serde(default)]
     pub skills_count: usize,
+    /// El usuario apreto "Ignorar" en el banner "Preparar workspace".
+    /// Si vuelve a aparecer, podra hacerlo desde el context menu.
+    #[serde(default)]
+    pub prep_dismissed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +58,7 @@ impl Workspace {
             specs_count: count_subdirs(&path.join("specs")),
             skills_count: workspace_skills + repos_skills,
             repos,
+            prep_dismissed: false,
         }
     }
 
@@ -66,6 +71,7 @@ impl Workspace {
                 claude_md_present: true,
                 specs_count: 28,
                 skills_count: 12,
+                prep_dismissed: false,
                 repos: vec![
                     Repo {
                         id: "repo-lelemon-app".into(),
@@ -104,6 +110,7 @@ impl Workspace {
                 claude_md_present: true,
                 specs_count: 15,
                 skills_count: 8,
+                prep_dismissed: false,
                 repos: vec![
                     Repo {
                         id: "repo-venpu-backend".into(),

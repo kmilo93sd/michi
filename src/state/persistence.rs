@@ -100,6 +100,7 @@ mod tests {
                 claude_md_present: true,
                 specs_count: 3,
                 skills_count: 1,
+                prep_dismissed: false,
                 repos: vec![Repo {
                     id: "repo-a".into(),
                     name: "alpha-app".into(),

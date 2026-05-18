@@ -13,3 +13,4 @@ pub mod terminal;
 pub mod theme;
 pub mod ui;
 pub mod worker;
+pub mod workspace_prep;

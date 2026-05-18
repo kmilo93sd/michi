@@ -14,6 +14,7 @@ use crate::ui::new_job_modal::{self, ModalAction, NewJobModalState};
 use crate::worker::{
     self, CreateWorktreeRequest, RemoveWorktreeRequest, StatusPollTarget, WorkerEvent,
 };
+use crate::workspace_prep;
 
 /// Cuánto esperar tras el último cambio antes de persistir el state al disco.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -31,6 +32,8 @@ pub struct App {
     pub new_job_modal_state: NewJobModalState,
     pub creating_worktree: bool,
     pub last_error: Option<String>,
+    /// Mensaje positivo efimero (preparacion exitosa, etc).
+    pub last_info: Option<String>,
     worker_tx: Sender<WorkerEvent>,
     worker_rx: Receiver<WorkerEvent>,
     status_targets_tx: Sender<Vec<StatusPollTarget>>,
@@ -91,7 +94,16 @@ enum WorkspaceMenu {
     DirectSession,
     NewWorktree,
     OpenFolder,
+    PrepareWorkspace,
     Remove,
+}
+
+/// Acciones del banner "Preparar workspace" que aparece en la card cuando
+/// `workspace_prep::inspect(...).is_bare()` y el usuario no lo descarto.
+#[derive(Clone, Copy)]
+enum PrepBannerAction {
+    Prepare,
+    Dismiss,
 }
 
 /// Acciones del menu contextual de una card de job en sidebar.
@@ -121,6 +133,7 @@ impl App {
             new_job_modal_state: NewJobModalState::initial(),
             creating_worktree: false,
             last_error: None,
+            last_info: None,
             worker_tx,
             worker_rx,
             status_targets_tx,
@@ -707,10 +720,40 @@ impl eframe::App for App {
             )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.small(
-                        "Ctrl+N nuevo \u{B7} Ctrl+Tab siguiente \u{B7} \
-                         Ctrl+Shift+Tab anterior \u{B7} Ctrl+W cerrar trabajo",
-                    );
+                    // Si hay un mensaje activo (error rojo o info accent), reemplaza
+                    // los hints de shortcuts. Click en X lo cierra. Sin auto-dismiss
+                    // para que el usuario tenga tiempo de leerlo.
+                    let mut dismiss_message = false;
+                    if let Some(msg) = self.last_error.as_deref() {
+                        ui.small(egui::RichText::new(msg).color(self.theme.status_error));
+                        if ui
+                            .small_button("X")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            dismiss_message = true;
+                        }
+                        if dismiss_message {
+                            self.last_error = None;
+                        }
+                    } else if let Some(msg) = self.last_info.as_deref() {
+                        ui.small(egui::RichText::new(msg).color(self.theme.accent));
+                        if ui
+                            .small_button("X")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            dismiss_message = true;
+                        }
+                        if dismiss_message {
+                            self.last_info = None;
+                        }
+                    } else {
+                        ui.small(
+                            "Ctrl+N nuevo \u{B7} Ctrl+Tab siguiente \u{B7} \
+                             Ctrl+Shift+Tab anterior \u{B7} Ctrl+W cerrar trabajo",
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.small(egui::RichText::new("dev:").weak());
                         if self.jobs.is_empty() {
@@ -879,6 +922,7 @@ impl App {
         let mut start_choice_for: Option<StartChoice> = None;
         let mut workspace_menu_pick: Option<(Workspace, WorkspaceMenu)> = None;
         let mut job_menu_pick: Option<(String, JobMenu)> = None;
+        let mut prep_action_for: Option<(String, PrepBannerAction)> = None;
 
         // Clone para evitar lifetime acrobatics: el loop necesita iterar workspaces
         // y simultaneamente leer self.collapsed_workspaces y jobs_for_workspace.
@@ -904,6 +948,19 @@ impl App {
                     }
                     if let Some(pick) = ws_outcome.menu_pick {
                         workspace_menu_pick = Some((ws.clone(), pick));
+                    }
+
+                    // Banner "Preparar workspace" si el workspace esta pelado
+                    // (sin CLAUDE.md / .claude / .mcp.json) y el usuario no lo
+                    // descarto. Filechecks son baratos (4 stats); cacheariamos
+                    // si esto creciera.
+                    if !ws.prep_dismissed {
+                        let status = workspace_prep::inspect(&ws.path);
+                        if status.is_bare()
+                            && let Some(action) = prep_banner(ui, &self.theme)
+                        {
+                            prep_action_for = Some((ws.id.clone(), action));
+                        }
                     }
 
                     if !ws_collapsed {
@@ -1001,6 +1058,68 @@ impl App {
         if let Some((job_id, action)) = job_menu_pick {
             self.handle_job_menu(&job_id, action);
         }
+        if let Some((ws_id, action)) = prep_action_for {
+            match action {
+                PrepBannerAction::Prepare => self.prepare_workspace_recommended(&ws_id),
+                PrepBannerAction::Dismiss => self.dismiss_workspace_prep(&ws_id),
+            }
+        }
+    }
+
+    /// Aplica la preparacion recomendada del workspace identificado por
+    /// `workspace_id`: lee su path, inspecciona que falta, crea lo que falta
+    /// y reporta inline. No sobreescribe archivos existentes (cubierto por
+    /// `workspace_prep::prepare`).
+    fn prepare_workspace_recommended(&mut self, workspace_id: &str) {
+        let Some(path) = self
+            .workspaces
+            .iter()
+            .find(|w| w.id == workspace_id)
+            .map(|w| w.path.clone())
+        else {
+            return;
+        };
+        let status = workspace_prep::inspect(&path);
+        let opts = workspace_prep::PrepareOpts::recommended_for(&status);
+        match workspace_prep::prepare(&path, opts) {
+            Ok(report) => {
+                let mut summary: Vec<&str> = Vec::new();
+                if !report.created.is_empty() {
+                    summary.push("scaffolding");
+                }
+                if report.git_initialized {
+                    summary.push("git init");
+                }
+                if summary.is_empty() {
+                    self.last_info = Some("Workspace ya estaba preparado.".into());
+                } else {
+                    self.last_info = Some(format!("Workspace preparado: {}.", summary.join(", ")));
+                }
+                self.last_error = None;
+                // Refrescar el snapshot del workspace en memoria (claude_md_present,
+                // specs_count, skills_count cambian tras crear scaffolding).
+                if let Some(w) = self.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+                    let refreshed = Workspace::from_path(&w.path);
+                    w.claude_md_present = refreshed.claude_md_present;
+                    w.specs_count = refreshed.specs_count;
+                    w.skills_count = refreshed.skills_count;
+                    w.repos = refreshed.repos;
+                }
+                self.mark_dirty();
+            }
+            Err(e) => {
+                self.last_error = Some(format!("no se pudo preparar workspace: {e:#}"));
+            }
+        }
+    }
+
+    /// Marca el banner "Preparar workspace" como descartado en este workspace.
+    /// La accion sigue accesible desde el context menu.
+    fn dismiss_workspace_prep(&mut self, workspace_id: &str) {
+        if let Some(w) = self.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+            w.prep_dismissed = true;
+            self.mark_dirty();
+        }
     }
 
     fn handle_workspace_menu(&mut self, ws: &Workspace, action: WorkspaceMenu) {
@@ -1015,6 +1134,9 @@ impl App {
                 if let Err(e) = system::open_folder(&ws.path) {
                     self.last_error = Some(format!("no se pudo abrir la carpeta: {e:#}"));
                 }
+            }
+            WorkspaceMenu::PrepareWorkspace => {
+                self.prepare_workspace_recommended(&ws.id);
             }
             WorkspaceMenu::Remove => {
                 let affected =
@@ -1102,6 +1224,10 @@ fn workspace_header(
             ui.close_kind(egui::UiKind::Menu);
         }
         ui.separator();
+        if ui.button("Preparar workspace").clicked() {
+            menu_pick = Some(WorkspaceMenu::PrepareWorkspace);
+            ui.close_kind(egui::UiKind::Menu);
+        }
         if ui.button("Abrir carpeta").clicked() {
             menu_pick = Some(WorkspaceMenu::OpenFolder);
             ui.close_kind(egui::UiKind::Menu);
@@ -1183,6 +1309,54 @@ fn plus_button(ui: &mut egui::Ui, theme: &Theme, row_hovered: bool, tooltip: &st
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tooltip);
     resp.clicked()
+}
+
+/// Banner inline que aparece bajo el header de un workspace pelado.
+/// Renderiza dos lineas: un texto sutil explicando el estado + una fila de
+/// botones (Preparar / Ignorar). El boton "Personalizar" no esta en el MVP:
+/// la accion recomendada cubre el 95% de los casos y mantiene la UX en 1
+/// click. Si manana se necesita, se agrega un tercer boton aqui.
+fn prep_banner(ui: &mut egui::Ui, theme: &Theme) -> Option<PrepBannerAction> {
+    let mut action: Option<PrepBannerAction> = None;
+    let frame = egui::Frame::new()
+        .fill(theme.bg_card_hover)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .corner_radius(egui::CornerRadius::same(4));
+    frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            egui::RichText::new("Workspace sin contexto (CLAUDE.md / .claude / .mcp.json).")
+                .small()
+                .color(theme.text_muted),
+        );
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new("Preparar").color(theme.accent).strong())
+                        .frame(false),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Crear CLAUDE.md, .claude/, specs/, .mcp.json y git init si aplica")
+                .clicked()
+            {
+                action = Some(PrepBannerAction::Prepare);
+            }
+            ui.add_space(12.0);
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new("Ignorar").color(theme.text_muted))
+                        .frame(false),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Ocultar este banner. Sigue accesible desde el context menu.")
+                .clicked()
+            {
+                action = Some(PrepBannerAction::Dismiss);
+            }
+        });
+    });
+    action
 }
 
 fn paint_tree_line(ui: &egui::Ui, rect: egui::Rect, theme: &Theme, offset_x: f32) {
