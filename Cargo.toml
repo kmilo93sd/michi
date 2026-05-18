@@ -12,6 +12,7 @@ anyhow = "1.0.102"
 dirs = "6.0.0"
 eframe = { version = "0.34.2", features = ["default_fonts", "glow"] }
 egui = "0.34.2"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tokio = { version = "1.52.3", features = ["rt", "macros", "sync", "time", "process", "io-util"] }
@@ -28,3 +29,6 @@ strip = true
 
 [profile.dev]
 opt-level = 1
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>michi logo</title>
+  <desc>ASCII cat =^.^= in Lelemon yellow on dark rounded background.</desc>
+
+  <rect width="256" height="256" rx="48" ry="48" fill="#0f0f11"/>
+
+  <g fill="#f7c948" stroke="#f7c948" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Left "=" (two horizontal bars) -->
+    <rect x="28"  y="118" width="26" height="8" rx="4"/>
+    <rect x="28"  y="138" width="26" height="8" rx="4"/>
+
+    <!-- Left "^" (caret) -->
+    <path d="M 68 142 L 88 102 L 108 142" fill="none" stroke-width="10"/>
+
+    <!-- Center "." (dot, slightly above baseline like ASCII) -->
+    <circle cx="128" cy="138" r="7"/>
+
+    <!-- Right "^" -->
+    <path d="M 148 142 L 168 102 L 188 142" fill="none" stroke-width="10"/>
+
+    <!-- Right "=" -->
+    <rect x="202" y="118" width="26" height="8" rx="4"/>
+    <rect x="202" y="138" width="26" height="8" rx="4"/>
+  </g>
+</svg>
