@@ -5,8 +5,14 @@
 
 ## Qué es michi
 
-Panel de control nativo en Rust + egui para gestionar múltiples instancias
-de Claude Code corriendo en paralelo, cada una en su propio `git worktree`.
+**AI-native development environment** para orquestar múltiples instancias de
+Claude Code en paralelo, cada una en su propio `git worktree` aislado.
+
+No es un IDE: michi no edita código, Claude lo hace. michi es el panel de
+control que corre muchos Claude Codes simultáneamente sin que se pisen entre
+ellos en git. La categoría correcta es **AI agent orchestrator** —
+emparentado con Devin, Replit Agent y Cline, distinto de Cursor/Windsurf
+(esos son IDEs con AI asistente; acá el agente es el actor principal).
 
 Estado: alpha · POC en desarrollo activo. Cross-platform desde día 1
 (Windows / macOS / Linux).
