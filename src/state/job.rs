@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobStatus {
@@ -47,6 +48,27 @@ pub struct Job {
 }
 
 impl Job {
+    /// Construye un `Job` para una "sesion directa": Claude corre en el repo
+    /// path tal cual, sin crear un git worktree separado. Util cuando solo
+    /// quieres conversar con Claude en la branch actual sin la ceremonia de
+    /// rama nueva + worktree.
+    ///
+    /// `branch` se marca como `(directo)` para que el header del job
+    /// muestre visiblemente que no hay un worktree dedicado y el flujo de
+    /// "cerrar trabajo" sepa que no debe llamar a `git worktree remove`.
+    pub fn for_direct_session(workspace: &str, repo: &str, repo_path: &Path) -> Self {
+        Self {
+            id: format!("job-{}", Uuid::new_v4()),
+            workspace: workspace.to_string(),
+            repo: repo.to_string(),
+            branch: "(directo)".into(),
+            worktree_path: repo_path.to_path_buf(),
+            status: JobStatus::Idle,
+            files_changed: 0,
+            last_activity: SystemTime::now(),
+        }
+    }
+
     pub fn mock_set() -> Vec<Job> {
         let now = SystemTime::now();
         vec![
@@ -227,6 +249,35 @@ mod tests {
             SystemTime::now() - std::time::Duration::from_secs(5 * 60),
         );
         assert_eq!(job.subtitle(), "7 cambios \u{B7} hace 5 min");
+    }
+
+    #[test]
+    fn for_direct_session_uses_repo_path_as_worktree_and_marks_branch() {
+        let path = PathBuf::from("/some/repo");
+        let job = Job::for_direct_session("my-ws", "my-repo", &path);
+
+        assert_eq!(job.workspace, "my-ws");
+        assert_eq!(job.repo, "my-repo");
+        assert_eq!(
+            job.worktree_path, path,
+            "una sesion directa usa el repo path como worktree path"
+        );
+        assert_eq!(job.status, JobStatus::Idle);
+        assert_eq!(job.files_changed, 0);
+        assert!(job.id.starts_with("job-"));
+        assert!(
+            job.branch.starts_with('(') || job.branch.contains("direct"),
+            "la branch debe marcarse para distinguirla de un worktree real, fue: {:?}",
+            job.branch
+        );
+    }
+
+    #[test]
+    fn for_direct_session_generates_unique_ids() {
+        let path = PathBuf::from("/x");
+        let a = Job::for_direct_session("ws", "repo", &path);
+        let b = Job::for_direct_session("ws", "repo", &path);
+        assert_ne!(a.id, b.id);
     }
 
     #[test]
