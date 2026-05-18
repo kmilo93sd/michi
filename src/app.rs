@@ -1213,31 +1213,37 @@ fn workspace_header(
     // Cursor pointer en todo el row indica que es interactivo (toggle).
     let area_response = area_response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
+    // Mismo menu se asigna al row entero Y al "+": el "+" es un widget hijo
+    // con Sense::click(), asi que el cursor sobre el "+" hace que egui le
+    // direccione el secondary_clicked al "+" y NO al row padre. Para que el
+    // click derecho funcione en cualquier zona del row (incluyendo el "+"),
+    // adjuntamos el mismo menu en ambos targets.
     let mut menu_pick: Option<WorkspaceMenu> = None;
-    area_response.context_menu(|ui| {
+    let menu_builder = |ui: &mut egui::Ui, picked: &mut Option<WorkspaceMenu>| {
         if ui.button("Sesion directa del workspace").clicked() {
-            menu_pick = Some(WorkspaceMenu::DirectSession);
+            *picked = Some(WorkspaceMenu::DirectSession);
             ui.close_kind(egui::UiKind::Menu);
         }
         if ui.button("Nuevo trabajo (worktree)").clicked() {
-            menu_pick = Some(WorkspaceMenu::NewWorktree);
+            *picked = Some(WorkspaceMenu::NewWorktree);
             ui.close_kind(egui::UiKind::Menu);
         }
         ui.separator();
         if ui.button("Preparar workspace").clicked() {
-            menu_pick = Some(WorkspaceMenu::PrepareWorkspace);
+            *picked = Some(WorkspaceMenu::PrepareWorkspace);
             ui.close_kind(egui::UiKind::Menu);
         }
         if ui.button("Abrir carpeta").clicked() {
-            menu_pick = Some(WorkspaceMenu::OpenFolder);
+            *picked = Some(WorkspaceMenu::OpenFolder);
             ui.close_kind(egui::UiKind::Menu);
         }
         ui.separator();
         if ui.button("Quitar workspace").clicked() {
-            menu_pick = Some(WorkspaceMenu::Remove);
+            *picked = Some(WorkspaceMenu::Remove);
             ui.close_kind(egui::UiKind::Menu);
         }
-    });
+    };
+    area_response.context_menu(|ui| menu_builder(ui, &mut menu_pick));
 
     let chevron = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
     let inner = rect.shrink2(egui::vec2(6.0, 4.0));
@@ -1247,10 +1253,9 @@ fn workspace_header(
             .layout(egui::Layout::top_down(egui::Align::LEFT)),
     );
 
-    // Linea 1: chevron + nombre + check de "configurado" a la izquierda,
+    // Linea 1: chevron + nombre + dot de "configurado" a la izquierda,
     // "+" pegado a la derecha. El "+" esta SIEMPRE renderizado (sin
-    // parpadeo). El check ✓ verde aparece solo cuando el workspace tiene
-    // al menos uno de CLAUDE.md / .claude / .mcp.json (i.e. no es bare).
+    // parpadeo). El dot verde aparece solo cuando el workspace no es bare.
     let mut play_clicked = false;
     child.horizontal(|ui| {
         ui.label(
@@ -1259,16 +1264,23 @@ fn workspace_header(
                 .color(theme.text_workspace_label),
         );
         if !status.is_bare() {
-            ui.add_space(2.0);
+            ui.add_space(4.0);
+            // U+25CF (filled circle) en lugar de checkmark: la fuente
+            // monoespaciada del sidebar lo renderiza, el checkmark caia en
+            // tofu. Color verde idle = mismo lenguaje visual que los status
+            // dots de jobs activos.
             ui.label(
-                egui::RichText::new("\u{2713}")
+                egui::RichText::new("\u{25CF}")
                     .small()
                     .color(theme.status_idle),
             )
             .on_hover_text(workspace_status_summary(status));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if plus_button(ui, theme, row_hovered, "Iniciar trabajo en este workspace") {
+            let (plus_clicked, plus_response) =
+                plus_button(ui, theme, row_hovered, "Iniciar trabajo en este workspace");
+            plus_response.context_menu(|ui| menu_builder(ui, &mut menu_pick));
+            if plus_clicked {
                 play_clicked = true;
             }
         });
@@ -1328,8 +1340,15 @@ fn workspace_status_summary(status: &workspace_prep::WorkspacePreparationStatus)
 }
 
 /// Boton "+" reutilizable: presencia constante, color sutil en idle y accent
-/// cuando el row padre esta hovereado. Devuelve true si se clickeo.
-fn plus_button(ui: &mut egui::Ui, theme: &Theme, row_hovered: bool, tooltip: &str) -> bool {
+/// cuando el row padre esta hovereado. Devuelve `(clicked, response)`. El
+/// caller usa `response` para adjuntar `context_menu` (asi el click derecho
+/// sobre el "+" abre el mismo menu que sobre el resto del row).
+fn plus_button(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    row_hovered: bool,
+    tooltip: &str,
+) -> (bool, egui::Response) {
     let color = if row_hovered {
         theme.accent
     } else {
@@ -1348,7 +1367,7 @@ fn plus_button(ui: &mut egui::Ui, theme: &Theme, row_hovered: bool, tooltip: &st
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tooltip);
-    resp.clicked()
+    (resp.clicked(), resp)
 }
 
 /// Banner inline que aparece bajo el header de un workspace pelado.
