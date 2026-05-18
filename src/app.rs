@@ -757,17 +757,23 @@ impl eframe::App for App {
                     Some(egui::FontId::monospace(self.theme.font_mono_size));
 
                 ui.add_space(10.0);
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 32.0],
-                        egui::Button::new("+ Nuevo trabajo"),
-                    )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    self.open_new_job_modal();
+                // Sin workspaces no se puede crear un trabajo: el CTA
+                // primario vive abajo en el tree ("+ Anadir workspace") y
+                // tambien en el empty state central. No mostramos el boton
+                // aqui para evitar que el usuario abra un modal inutil.
+                if !self.workspaces.is_empty() {
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 32.0],
+                            egui::Button::new("+ Nuevo trabajo"),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.open_new_job_modal();
+                    }
+                    ui.add_space(10.0);
                 }
-                ui.add_space(10.0);
 
                 if !self.jobs.is_empty() {
                     ui.small(
@@ -783,24 +789,21 @@ impl eframe::App for App {
 
                 ui.separator();
 
-                if self.workspaces.is_empty() {
-                    ui.add_space(12.0);
-                    ui.vertical_centered(|ui| {
-                        ui.small(egui::RichText::new("Aun no hay trabajos.").weak());
-                    });
-                } else {
-                    self.render_sidebar_tree(ui);
-                }
+                // El sidebar tree se renderiza siempre: maneja la lista
+                // vacia internamente y, sobre todo, deja accesible el boton
+                // "+ Anadir workspace" tambien cuando todavia no hay ninguno.
+                self.render_sidebar_tree(ui);
             });
 
         let selected_id = self.selected_job_id.clone();
-        let mut empty_state_create_clicked = false;
+        let mut empty_state_action = EmptyStateAction::None;
         let mut close_clicked: Option<String> = None;
+        let has_workspaces = !self.workspaces.is_empty();
         egui::CentralPanel::default()
             .frame(self.theme.base_panel_frame())
             .show_inside(ui, |ui| {
                 if self.jobs.is_empty() {
-                    empty_state_create_clicked = render_empty_state(ui);
+                    empty_state_action = render_empty_state(ui, has_workspaces);
                 } else if let Some(id) = selected_id {
                     close_clicked = self.render_selected_job(ui, &id);
                 } else {
@@ -809,8 +812,10 @@ impl eframe::App for App {
                     });
                 }
             });
-        if empty_state_create_clicked {
-            self.open_new_job_modal();
+        match empty_state_action {
+            EmptyStateAction::CreateJob => self.open_new_job_modal(),
+            EmptyStateAction::AddWorkspace => self.pick_and_add_workspace(),
+            EmptyStateAction::None => {}
         }
         if let Some(id) = close_clicked {
             self.request_close_job(&id);
@@ -966,24 +971,50 @@ impl App {
                     }
                 }
 
-                // Boton secundario al final de la lista: anadir otro workspace.
-                ui.add_space(16.0);
-                ui.separator();
-                ui.add_space(8.0);
-                let add_btn = ui.add(
-                    egui::Button::new(
-                        egui::RichText::new("+ Anadir workspace").color(self.theme.text_muted),
-                    )
-                    .frame(false),
-                );
-                if add_btn
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Selecciona la carpeta padre donde estan tus repos")
-                    .clicked()
-                {
-                    add_workspace_clicked = true;
+                // Cuando no hay workspaces, el CTA principal es anadir uno:
+                // sin workspace no se puede crear ningun trabajo, asi que
+                // mostramos un boton prominente en vez del link discreto.
+                if workspaces.is_empty() {
+                    ui.add_space(8.0);
+                    ui.vertical_centered(|ui| {
+                        ui.small(
+                            egui::RichText::new("Aun no hay workspaces.")
+                                .color(self.theme.text_muted),
+                        );
+                    });
+                    ui.add_space(8.0);
+                    let primary = ui.add_sized(
+                        [ui.available_width(), 32.0],
+                        egui::Button::new("+ Anadir workspace"),
+                    );
+                    if primary
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Selecciona la carpeta padre donde estan tus repos")
+                        .clicked()
+                    {
+                        add_workspace_clicked = true;
+                    }
+                } else {
+                    // Boton secundario al final de la lista cuando ya hay
+                    // al menos un workspace: link discreto, sin frame.
+                    ui.add_space(16.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    let add_btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("+ Anadir workspace").color(self.theme.text_muted),
+                        )
+                        .frame(false),
+                    );
+                    if add_btn
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Selecciona la carpeta padre donde estan tus repos")
+                        .clicked()
+                    {
+                        add_workspace_clicked = true;
+                    }
+                    ui.add_space(8.0);
                 }
-                ui.add_space(8.0);
             });
 
         if let Some(id) = clicked_id {
@@ -1389,31 +1420,58 @@ fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool, theme: &Theme) 
     }
 }
 
-fn render_empty_state(ui: &mut egui::Ui) -> bool {
-    let mut clicked = false;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EmptyStateAction {
+    None,
+    CreateJob,
+    AddWorkspace,
+}
+
+fn render_empty_state(ui: &mut egui::Ui, has_workspaces: bool) -> EmptyStateAction {
+    let mut action = EmptyStateAction::None;
     ui.vertical_centered(|ui| {
         ui.add_space(96.0);
-        ui.heading("Sin trabajos todavia");
-        ui.add_space(12.0);
-        ui.label(
-            egui::RichText::new(
-                "Cada trabajo es un Claude Code corriendo en su propio worktree de git.\n\
-                 Crea uno para empezar a paralelizar tu trabajo sin pisarte entre repos.",
-            )
-            .weak(),
-        );
-        ui.add_space(24.0);
-        if ui
-            .add_sized([220.0, 36.0], egui::Button::new("+ Crear primer trabajo"))
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
-        {
-            clicked = true;
+        if has_workspaces {
+            ui.heading("Sin trabajos todavia");
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(
+                    "Cada trabajo es un Claude Code corriendo en su propio worktree de git.\n\
+                     Crea uno para empezar a paralelizar tu trabajo sin pisarte entre repos.",
+                )
+                .weak(),
+            );
+            ui.add_space(24.0);
+            if ui
+                .add_sized([220.0, 36.0], egui::Button::new("+ Crear primer trabajo"))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                action = EmptyStateAction::CreateJob;
+            }
+            ui.add_space(8.0);
+            ui.small(egui::RichText::new("o Ctrl+N").weak());
+        } else {
+            ui.heading("Anade tu primer workspace");
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(
+                    "Un workspace es la carpeta padre que contiene tus repos.\n\
+                     Desde ahi michi puede crear worktrees y orquestar varios Claude Code en paralelo.",
+                )
+                .weak(),
+            );
+            ui.add_space(24.0);
+            if ui
+                .add_sized([220.0, 36.0], egui::Button::new("+ Anadir workspace"))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                action = EmptyStateAction::AddWorkspace;
+            }
         }
-        ui.add_space(8.0);
-        ui.small(egui::RichText::new("o Ctrl+N").weak());
     });
-    clicked
+    action
 }
 
 struct JobPaneOutcome {
