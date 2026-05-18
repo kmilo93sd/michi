@@ -8,10 +8,15 @@ use tracing::warn;
 use crate::state::{AppState, Job, JobStatus, Workspace};
 use crate::theme::Theme;
 use crate::ui::new_job_modal::{self, ModalAction, NewJobModalState};
-use crate::worker::{self, CreateWorktreeRequest, WorkerEvent};
+use crate::worker::{
+    self, CreateWorktreeRequest, RemoveWorktreeRequest, StatusPollTarget, WorkerEvent,
+};
 
 /// Cuánto esperar tras el último cambio antes de persistir el state al disco.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Cada cuánto el worker poller hace `git status` por job.
+const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct App {
     pub workspaces: Vec<Workspace>,
@@ -26,7 +31,22 @@ pub struct App {
     pub last_error: Option<String>,
     worker_tx: Sender<WorkerEvent>,
     worker_rx: Receiver<WorkerEvent>,
+    status_targets_tx: Sender<Vec<StatusPollTarget>>,
     dirty_since: Option<Instant>,
+    close_confirm: Option<CloseConfirm>,
+}
+
+/// Estado del modal de confirmacion para cerrar un job con cambios pendientes.
+struct CloseConfirm {
+    job_id: String,
+    repo_path: std::path::PathBuf,
+    worktree_path: std::path::PathBuf,
+    files_changed: u32,
+}
+
+enum CloseConfirmAction {
+    Force,
+    Cancel,
 }
 
 impl App {
@@ -34,8 +54,10 @@ impl App {
         let theme = Theme::load_or_create_default();
         cc.egui_ctx.set_visuals(theme.build_visuals());
         let (worker_tx, worker_rx) = mpsc::channel();
+        let status_targets_tx =
+            worker::spawn_status_poller(worker_tx.clone(), STATUS_POLL_INTERVAL);
         let persisted = AppState::load_or_default();
-        Self {
+        let app = Self {
             workspaces: persisted.workspaces,
             jobs: persisted.jobs,
             selected_job_id: persisted.selected_job_id,
@@ -48,7 +70,145 @@ impl App {
             last_error: None,
             worker_tx,
             worker_rx,
+            status_targets_tx,
             dirty_since: None,
+            close_confirm: None,
+        };
+        app.push_status_targets();
+        app
+    }
+
+    fn push_status_targets(&self) {
+        let targets: Vec<StatusPollTarget> = self
+            .jobs
+            .iter()
+            .map(|j| StatusPollTarget {
+                job_id: j.id.clone(),
+                worktree_path: j.worktree_path.clone(),
+            })
+            .collect();
+        let _ = self.status_targets_tx.send(targets);
+    }
+
+    fn repo_path_for_job(&self, job: &Job) -> Option<std::path::PathBuf> {
+        self.workspaces
+            .iter()
+            .find(|w| w.name == job.workspace)
+            .and_then(|w| w.repos.iter().find(|r| r.name == job.repo))
+            .map(|r| r.path.clone())
+    }
+
+    fn request_close_job(&mut self, job_id: &str) {
+        let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() else {
+            return;
+        };
+        let Some(repo_path) = self.repo_path_for_job(&job) else {
+            self.last_error = Some(format!(
+                "no se encontro el repo {} para el job {}",
+                job.repo, job.id
+            ));
+            return;
+        };
+        if job.files_changed > 0 {
+            self.close_confirm = Some(CloseConfirm {
+                job_id: job.id.clone(),
+                repo_path,
+                worktree_path: job.worktree_path.clone(),
+                files_changed: job.files_changed,
+            });
+        } else {
+            self.send_close_job(&job.id, &repo_path, &job.worktree_path, false);
+        }
+    }
+
+    fn send_close_job(
+        &self,
+        job_id: &str,
+        repo_path: &std::path::Path,
+        worktree_path: &std::path::Path,
+        force: bool,
+    ) {
+        worker::spawn_remove_worktree(
+            RemoveWorktreeRequest {
+                job_id: job_id.to_string(),
+                repo_path: repo_path.to_path_buf(),
+                worktree_path: worktree_path.to_path_buf(),
+                force,
+            },
+            self.worker_tx.clone(),
+        );
+    }
+
+    fn render_close_confirm(&mut self, ctx: &egui::Context) {
+        let Some(confirm) = self.close_confirm.as_ref() else {
+            return;
+        };
+        let theme = &self.theme;
+        let frame = egui::Frame::new()
+            .fill(theme.bg_surface)
+            .inner_margin(egui::Margin::same(20))
+            .corner_radius(egui::CornerRadius::same(8))
+            .stroke(egui::Stroke::new(1.0, theme.border));
+
+        let mut action: Option<CloseConfirmAction> = None;
+        let modal_response = egui::Modal::new(egui::Id::new("close_confirm_modal"))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_min_width(380.0);
+                ui.set_max_width(520.0);
+                ui.heading("Cerrar trabajo");
+                ui.add_space(12.0);
+                ui.label(format!(
+                    "Tienes {} archivos modificados sin commitear en esta rama.",
+                    confirm.files_changed
+                ));
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Si descartas, el worktree se elimina pero la rama queda intacta. \
+                         Los cambios sin commitear se pierden.",
+                    )
+                    .small()
+                    .color(theme.text_muted),
+                );
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("Descartar y cerrar")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            action = Some(CloseConfirmAction::Force);
+                        }
+                        ui.add_space(8.0);
+                        if ui
+                            .button("Cancelar")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            action = Some(CloseConfirmAction::Cancel);
+                        }
+                    });
+                });
+            });
+
+        if modal_response.backdrop_response.clicked() {
+            action = Some(CloseConfirmAction::Cancel);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            action = Some(CloseConfirmAction::Cancel);
+        }
+
+        match action {
+            Some(CloseConfirmAction::Force) => {
+                let c = self.close_confirm.take().expect("checked above");
+                self.send_close_job(&c.job_id, &c.repo_path, &c.worktree_path, true);
+            }
+            Some(CloseConfirmAction::Cancel) => {
+                self.close_confirm = None;
+            }
+            None => {}
         }
     }
 
@@ -93,18 +253,43 @@ impl App {
     /// Drena los eventos del worker que llegaron desde el último frame.
     fn drain_worker_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.worker_rx.try_recv() {
-            self.creating_worktree = false;
             match event {
                 WorkerEvent::WorktreeCreated(job) => {
+                    self.creating_worktree = false;
                     let id = job.id.clone();
                     self.jobs.push(job);
                     self.selected_job_id = Some(id);
                     self.last_error = None;
                     self.close_new_job_modal();
                     self.mark_dirty();
+                    self.push_status_targets();
                 }
                 WorkerEvent::WorktreeFailed { message } => {
+                    self.creating_worktree = false;
                     self.last_error = Some(message);
+                }
+                WorkerEvent::WorktreeRemoved { job_id } => {
+                    self.jobs.retain(|j| j.id != job_id);
+                    if self.selected_job_id.as_deref() == Some(job_id.as_str()) {
+                        self.selected_job_id = self.jobs.first().map(|j| j.id.clone());
+                    }
+                    self.last_error = None;
+                    self.mark_dirty();
+                    self.push_status_targets();
+                }
+                WorkerEvent::WorktreeRemoveFailed { job_id: _, message } => {
+                    self.last_error = Some(message);
+                }
+                WorkerEvent::JobFilesChanged {
+                    job_id,
+                    files_changed,
+                } => {
+                    if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id)
+                        && job.files_changed != files_changed
+                    {
+                        job.files_changed = files_changed;
+                        self.mark_dirty();
+                    }
                 }
             }
             ctx.request_repaint();
@@ -269,13 +454,16 @@ impl eframe::App for App {
             });
 
         let mut empty_state_create_clicked = false;
+        let mut close_clicked: Option<String> = None;
         egui::CentralPanel::default()
             .frame(self.theme.base_panel_frame())
             .show_inside(ui, |ui| {
                 if self.jobs.is_empty() {
                     empty_state_create_clicked = render_empty_state(ui);
                 } else if let Some(job) = self.selected_job() {
-                    render_job_pane(ui, job, &self.theme);
+                    if render_job_pane(ui, job, &self.theme).close_clicked {
+                        close_clicked = Some(job.id.clone());
+                    }
                 } else {
                     ui.centered_and_justified(|ui| {
                         ui.label("Selecciona un trabajo de la barra lateral");
@@ -285,6 +473,11 @@ impl eframe::App for App {
         if empty_state_create_clicked {
             self.open_new_job_modal();
         }
+        if let Some(id) = close_clicked {
+            self.request_close_job(&id);
+        }
+
+        self.render_close_confirm(ui.ctx());
 
         if self.new_job_modal_open {
             let action = new_job_modal::show(
@@ -546,7 +739,14 @@ fn render_empty_state(ui: &mut egui::Ui) -> bool {
     clicked
 }
 
-fn render_job_pane(ui: &mut egui::Ui, job: &Job, theme: &Theme) {
+struct JobPaneOutcome {
+    close_clicked: bool,
+}
+
+fn render_job_pane(ui: &mut egui::Ui, job: &Job, theme: &Theme) -> JobPaneOutcome {
+    let mut outcome = JobPaneOutcome {
+        close_clicked: false,
+    };
     let header_frame = egui::Frame::new()
         .fill(theme.bg_surface)
         .inner_margin(egui::Margin::symmetric(12, 8));
@@ -559,9 +759,14 @@ fn render_job_pane(ui: &mut egui::Ui, job: &Job, theme: &Theme) {
             ui.horizontal(|ui| {
                 ui.label(format!("{} archivos modificados", job.files_changed));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let _ = ui
+                    if ui
                         .button("X")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Cerrar trabajo y eliminar worktree")
+                        .clicked()
+                    {
+                        outcome.close_clicked = true;
+                    }
                     let _ = ui
                         .button("Commit & Push")
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -576,4 +781,5 @@ fn render_job_pane(ui: &mut egui::Ui, job: &Job, theme: &Theme) {
     ui.painter().rect_filled(rect, 0.0, theme.bg_base);
     ui.add_space(12.0);
     ui.label(egui::RichText::new("terminal placeholder (Fase 4)").color(theme.text_muted));
+    outcome
 }
