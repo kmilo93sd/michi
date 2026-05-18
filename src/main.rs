@@ -6,6 +6,7 @@ mod app;
 mod git;
 mod state;
 mod terminal;
+mod theme;
 mod ui;
 
 fn main() -> Result<()> {

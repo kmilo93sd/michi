@@ -1,3 +1,5 @@
 pub mod job;
+pub mod workspace;
 
-pub use job::{humanize_elapsed, Job, JobStatus};
+pub use job::{Job, JobStatus};
+pub use workspace::Workspace;

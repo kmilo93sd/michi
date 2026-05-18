@@ -1,25 +1,30 @@
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 use eframe::CreationContext;
 
-use crate::state::{Job, JobStatus};
-
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(247, 201, 72);
-const CARD_BG_SELECTED: egui::Color32 = egui::Color32::from_rgb(40, 40, 44);
-const CARD_BG_HOVER: egui::Color32 = egui::Color32::from_rgb(32, 32, 36);
-const WORKSPACE_LABEL: egui::Color32 = egui::Color32::from_rgb(140, 140, 150);
+use crate::state::{Job, JobStatus, Workspace};
+use crate::theme::Theme;
 
 pub struct App {
+    pub workspaces: Vec<Workspace>,
     pub jobs: Vec<Job>,
     pub selected_job_id: Option<String>,
+    pub collapsed_workspaces: HashSet<String>,
+    pub collapsed_repos: HashSet<String>,
+    pub theme: Theme,
 }
 
 impl App {
     pub fn new(cc: &CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        let theme = Theme::load_or_create_default();
+        cc.egui_ctx.set_visuals(theme.build_visuals());
         Self {
+            workspaces: Vec::new(),
             jobs: Vec::new(),
             selected_job_id: None,
+            collapsed_workspaces: HashSet::new(),
+            collapsed_repos: HashSet::new(),
+            theme,
         }
     }
 
@@ -36,20 +41,34 @@ impl App {
     }
 
     fn load_mock(&mut self) {
+        self.workspaces = Workspace::mock_set();
         self.jobs = Job::mock_set();
         self.selected_job_id = self.jobs.first().map(|j| j.id.clone());
     }
 
     fn clear_jobs(&mut self) {
+        self.workspaces.clear();
         self.jobs.clear();
         self.selected_job_id = None;
+    }
+
+    fn jobs_for_repo(&self, workspace: &str, repo: &str) -> Vec<&Job> {
+        self.jobs
+            .iter()
+            .filter(|j| j.workspace == workspace && j.repo == repo)
+            .collect()
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::TopBottomPanel::bottom("bottom_bar")
-            .exact_height(24.0)
+        egui::Panel::bottom("bottom_bar")
+            .exact_size(self.theme.bottom_bar_height)
+            .frame(
+                self.theme
+                    .surface_panel_frame()
+                    .inner_margin(egui::Margin::symmetric(10, 4)),
+            )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.small(
@@ -59,28 +78,44 @@ impl eframe::App for App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.small(egui::RichText::new("dev:").weak());
                         if self.jobs.is_empty() {
-                            if ui.small_button("cargar mock").clicked() {
+                            if ui
+                                .small_button("cargar mock")
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked()
+                            {
                                 self.load_mock();
                             }
-                        } else if ui.small_button("limpiar").clicked() {
+                        } else if ui
+                            .small_button("limpiar")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
                             self.clear_jobs();
                         }
                     });
                 });
             });
 
-        egui::SidePanel::left("sidebar")
-            .min_width(260.0)
-            .max_width(320.0)
-            .default_width(280.0)
+        egui::Panel::left("sidebar")
+            .size_range(self.theme.sidebar_min_width..=self.theme.sidebar_max_width)
+            .default_size(self.theme.sidebar_default_width)
             .resizable(true)
+            .frame(
+                self.theme
+                    .surface_panel_frame()
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
+            )
             .show_inside(ui, |ui| {
+                ui.style_mut().override_font_id =
+                    Some(egui::FontId::monospace(self.theme.font_mono_size));
+
                 ui.add_space(10.0);
                 if ui
                     .add_sized(
                         [ui.available_width(), 32.0],
                         egui::Button::new("+ Nuevo trabajo"),
                     )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
                     // TODO Fase 3: abrir modal nuevo trabajo
@@ -88,66 +123,90 @@ impl eframe::App for App {
                 ui.add_space(10.0);
 
                 if !self.jobs.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.small(
-                            egui::RichText::new(format!(
-                                "{} trabajos \u{B7} {} pensando",
-                                self.jobs.len(),
-                                self.count_thinking()
-                            ))
-                            .weak(),
-                        );
-                    });
+                    ui.small(
+                        egui::RichText::new(format!(
+                            "{} trabajos \u{B7} {} pensando",
+                            self.jobs.len(),
+                            self.count_thinking()
+                        ))
+                        .weak(),
+                    );
                     ui.add_space(6.0);
                 }
 
                 ui.separator();
 
-                if self.jobs.is_empty() {
+                if self.workspaces.is_empty() {
                     ui.add_space(12.0);
                     ui.vertical_centered(|ui| {
                         ui.small(egui::RichText::new("Aun no hay trabajos.").weak());
                     });
                 } else {
-                    self.render_sidebar_jobs(ui);
+                    self.render_sidebar_tree(ui);
                 }
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            if self.jobs.is_empty() {
-                render_empty_state(ui);
-            } else if let Some(job) = self.selected_job() {
-                render_job_pane(ui, job);
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Selecciona un trabajo de la barra lateral");
-                });
-            }
-        });
+        egui::CentralPanel::default()
+            .frame(self.theme.base_panel_frame())
+            .show_inside(ui, |ui| {
+                if self.jobs.is_empty() {
+                    render_empty_state(ui);
+                } else if let Some(job) = self.selected_job() {
+                    render_job_pane(ui, job, &self.theme);
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Selecciona un trabajo de la barra lateral");
+                    });
+                }
+            });
     }
 }
 
 impl App {
-    fn render_sidebar_jobs(&mut self, ui: &mut egui::Ui) {
-        let grouped = group_by_workspace(&self.jobs);
+    fn render_sidebar_tree(&mut self, ui: &mut egui::Ui) {
         let mut clicked_id: Option<String> = None;
+        let mut toggle_ws: Option<String> = None;
+        let mut toggle_repo: Option<String> = None;
+
+        // Clone para evitar lifetime acrobatics: el loop necesita iterar workspaces
+        // y simultaneamente leer self.collapsed_workspaces y jobs_for_repo.
+        let workspaces = self.workspaces.clone();
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for (workspace, jobs) in grouped {
+                for ws in &workspaces {
                     ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(workspace.to_uppercase())
-                            .small()
-                            .color(WORKSPACE_LABEL),
-                    );
-                    ui.add_space(4.0);
+                    let ws_collapsed = self.collapsed_workspaces.contains(&ws.id);
+                    if workspace_header(ui, &self.theme, ws, ws_collapsed).clicked() {
+                        toggle_ws = Some(ws.id.clone());
+                    }
 
-                    for job in jobs {
-                        let selected = self.selected_job_id.as_deref() == Some(&job.id);
-                        if render_job_card(ui, job, selected).clicked() {
-                            clicked_id = Some(job.id.clone());
+                    if !ws_collapsed {
+                        for repo in &ws.repos {
+                            let repo_collapsed = self.collapsed_repos.contains(&repo.id);
+                            let repo_jobs = self.jobs_for_repo(&ws.name, &repo.name);
+
+                            if repo_header(
+                                ui,
+                                &self.theme,
+                                &repo.name,
+                                repo_collapsed,
+                                repo_jobs.len(),
+                            )
+                            .clicked()
+                            {
+                                toggle_repo = Some(repo.id.clone());
+                            }
+
+                            if !repo_collapsed {
+                                for job in repo_jobs {
+                                    let selected = self.selected_job_id.as_deref() == Some(&job.id);
+                                    if render_job_card(ui, job, selected, &self.theme).clicked() {
+                                        clicked_id = Some(job.id.clone());
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -156,29 +215,119 @@ impl App {
         if let Some(id) = clicked_id {
             self.selected_job_id = Some(id);
         }
+        if let Some(id) = toggle_ws
+            && !self.collapsed_workspaces.remove(&id)
+        {
+            self.collapsed_workspaces.insert(id);
+        }
+        if let Some(id) = toggle_repo
+            && !self.collapsed_repos.remove(&id)
+        {
+            self.collapsed_repos.insert(id);
+        }
     }
 }
 
-fn group_by_workspace(jobs: &[Job]) -> BTreeMap<&str, Vec<&Job>> {
-    let mut map: BTreeMap<&str, Vec<&Job>> = BTreeMap::new();
-    for j in jobs {
-        map.entry(j.workspace.as_str()).or_default().push(j);
-    }
-    map
-}
-
-fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool) -> egui::Response {
+fn workspace_header(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    ws: &Workspace,
+    collapsed: bool,
+) -> egui::Response {
     let full_width = ui.available_width();
-    let row_height = 56.0;
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(full_width, row_height),
+        egui::vec2(full_width, theme.workspace_header_height),
+        egui::Sense::click(),
+    );
+
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 4.0, theme.bg_card_hover);
+    }
+
+    let chevron = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
+    let inner = rect.shrink2(egui::vec2(6.0, 4.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::top_down(egui::Align::LEFT)),
+    );
+
+    child.label(
+        egui::RichText::new(format!("{} {}", chevron, ws.name.to_uppercase()))
+            .small()
+            .color(theme.text_workspace_label),
+    );
+    child.label(
+        egui::RichText::new(format!(
+            "{} specs \u{B7} {} skills",
+            ws.specs_count, ws.skills_count
+        ))
+        .small()
+        .color(theme.text_muted),
+    );
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn repo_header(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    name: &str,
+    collapsed: bool,
+    job_count: usize,
+) -> egui::Response {
+    let full_width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(full_width, theme.repo_header_height),
+        egui::Sense::click(),
+    );
+
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 4.0, theme.bg_card_hover);
+    }
+
+    paint_tree_line(ui, rect, theme, theme.tree_line_ws_x);
+
+    let chevron = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
+    let inner = rect.shrink2(egui::vec2(22.0, 4.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+
+    child.label(egui::RichText::new(format!("{} {}", chevron, name)).color(theme.text_repo_label));
+    if job_count > 0 {
+        child.add_space(8.0);
+        child.label(
+            egui::RichText::new(format!("{}", job_count))
+                .small()
+                .color(theme.text_muted),
+        );
+    }
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn paint_tree_line(ui: &egui::Ui, rect: egui::Rect, theme: &Theme, offset_x: f32) {
+    let x = rect.min.x + offset_x;
+    ui.painter().line_segment(
+        [egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)],
+        egui::Stroke::new(1.0, theme.border),
+    );
+}
+
+fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool, theme: &Theme) -> egui::Response {
+    let full_width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(full_width, theme.card_row_height),
         egui::Sense::click(),
     );
 
     let bg = if selected {
-        CARD_BG_SELECTED
+        theme.bg_card_selected
     } else if response.hovered() {
-        CARD_BG_HOVER
+        theme.bg_card_hover
     } else {
         egui::Color32::TRANSPARENT
     };
@@ -186,10 +335,13 @@ fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool) -> egui::Respon
 
     if selected {
         let bar = egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height()));
-        ui.painter().rect_filled(bar, 0.0, ACCENT);
+        ui.painter().rect_filled(bar, 0.0, theme.accent);
     }
 
-    let inner = rect.shrink2(egui::vec2(12.0, 8.0));
+    paint_tree_line(ui, rect, theme, theme.tree_line_ws_x);
+    paint_tree_line(ui, rect, theme, theme.tree_line_repo_x);
+
+    let inner = rect.shrink2(egui::vec2(40.0, 6.0));
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(inner)
@@ -197,13 +349,12 @@ fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool) -> egui::Respon
     );
 
     child.horizontal(|ui| {
-        ui.colored_label(job.status.color(), job.status.dot().to_string());
-        ui.label(egui::RichText::new(&job.repo).strong());
+        ui.colored_label(job.status.color(theme), job.status.dot().to_string());
+        ui.label(egui::RichText::new(&job.branch).strong());
     });
-    child.label(egui::RichText::new(&job.branch).small().weak());
 
     let subtitle_color = if job.status == JobStatus::NeedsAttention {
-        Some(JobStatus::NeedsAttention.color())
+        Some(theme.status_needs_attention)
     } else {
         None
     };
@@ -214,7 +365,7 @@ fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool) -> egui::Respon
         child.label(subtitle_text.weak());
     }
 
-    response
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn render_empty_state(ui: &mut egui::Ui) {
@@ -230,33 +381,42 @@ fn render_empty_state(ui: &mut egui::Ui) {
             .weak(),
         );
         ui.add_space(24.0);
-        let _ = ui.add_sized([220.0, 36.0], egui::Button::new("+ Crear primer trabajo"));
+        let _ = ui
+            .add_sized([220.0, 36.0], egui::Button::new("+ Crear primer trabajo"))
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
         ui.add_space(8.0);
         ui.small(egui::RichText::new("o Ctrl+N").weak());
     });
 }
 
-fn render_job_pane(ui: &mut egui::Ui, job: &Job) {
-    egui::TopBottomPanel::top("main_header")
-        .exact_height(72.0)
+fn render_job_pane(ui: &mut egui::Ui, job: &Job, theme: &Theme) {
+    let header_frame = egui::Frame::new()
+        .fill(theme.bg_surface)
+        .inner_margin(egui::Margin::symmetric(12, 8));
+    egui::Panel::top("main_header")
+        .exact_size(theme.job_header_height)
+        .frame(header_frame)
         .show_inside(ui, |ui| {
-            ui.add_space(4.0);
             ui.strong(format!("{} \u{B7} {}", job.repo, job.branch));
             ui.label(job.worktree_path.to_string_lossy().replace('\\', "/"));
             ui.horizontal(|ui| {
                 ui.label(format!("{} archivos modificados", job.files_changed));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let _ = ui.button("X");
-                    let _ = ui.button("Commit & Push");
-                    let _ = ui.button("Diff");
+                    let _ = ui
+                        .button("X")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let _ = ui
+                        .button("Commit & Push")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let _ = ui
+                        .button("Diff")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
                 });
             });
         });
 
-    egui::Frame::group(ui.style())
-        .fill(egui::Color32::from_rgb(20, 20, 22))
-        .show(ui, |ui| {
-            ui.allocate_space(ui.available_size());
-            ui.label("terminal placeholder (Fase 4)");
-        });
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(rect, 0.0, theme.bg_base);
+    ui.add_space(12.0);
+    ui.label(egui::RichText::new("terminal placeholder (Fase 4)").color(theme.text_muted));
 }
