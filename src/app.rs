@@ -7,6 +7,7 @@ use egui_term::{PtyEvent, TerminalView};
 use tracing::{debug, warn};
 
 use crate::claude_config::{self, ClaudeInventory};
+use crate::port_alloc;
 use crate::state::{self, AppState, Job, JobStatus, Workspace};
 use crate::system;
 use crate::terminal::{self, JobTerminal};
@@ -334,7 +335,8 @@ impl App {
     /// Inicia una sesion de workspace: claude corre en workspace.path con
     /// acceso a todos los repos hijos. No hay git worktree.
     fn start_workspace_session(&mut self, workspace_name: &str, workspace_path: &std::path::Path) {
-        let job = Job::for_workspace_session(workspace_name, workspace_path);
+        let mut job = Job::for_workspace_session(workspace_name, workspace_path);
+        job.port_range_start = port_alloc::assign_next_range(&self.jobs);
         let id = job.id.clone();
         self.jobs.push(job);
         self.selected_job_id = Some(id);
@@ -352,7 +354,8 @@ impl App {
         repo_name: &str,
         repo_path: &std::path::Path,
     ) {
-        let job = Job::for_direct_session(workspace_name, repo_name, repo_path);
+        let mut job = Job::for_direct_session(workspace_name, repo_name, repo_path);
+        job.port_range_start = port_alloc::assign_next_range(&self.jobs);
         let id = job.id.clone();
         self.jobs.push(job);
         self.selected_job_id = Some(id);
@@ -582,8 +585,12 @@ impl App {
     fn drain_worker_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.worker_rx.try_recv() {
             match event {
-                WorkerEvent::WorktreeCreated(job) => {
+                WorkerEvent::WorktreeCreated(mut job) => {
                     self.creating_worktree = false;
+                    // El worker no tiene acceso a la lista global de jobs;
+                    // asignamos el rango aqui en el UI thread donde si tenemos
+                    // visibilidad de los rangos ocupados.
+                    job.port_range_start = port_alloc::assign_next_range(&self.jobs);
                     let id = job.id.clone();
                     self.jobs.push(job);
                     self.selected_job_id = Some(id);

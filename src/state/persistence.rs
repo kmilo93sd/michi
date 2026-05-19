@@ -118,6 +118,7 @@ mod tests {
                 status: JobStatus::Idle,
                 files_changed: 2,
                 last_activity: SystemTime::now(),
+                port_range_start: 0,
             }],
             selected_job_id: Some("job-1".into()),
             collapsed_workspaces: collapsed_ws,

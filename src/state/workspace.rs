@@ -298,6 +298,7 @@ mod tests {
                 status: crate::state::JobStatus::Idle,
                 files_changed: 0,
                 last_activity: std::time::SystemTime::now(),
+                port_range_start: 0,
             },
             crate::state::Job {
                 id: "job-2".into(),
@@ -308,6 +309,7 @@ mod tests {
                 status: crate::state::JobStatus::Idle,
                 files_changed: 0,
                 last_activity: std::time::SystemTime::now(),
+                port_range_start: 0,
             },
         ];
 

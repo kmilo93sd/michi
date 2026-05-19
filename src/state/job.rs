@@ -45,6 +45,12 @@ pub struct Job {
     pub files_changed: u32,
     #[serde(skip, default = "SystemTime::now")]
     pub last_activity: SystemTime,
+    /// Inicio del rango de puertos que michi reserva para esta sesion.
+    /// Sesion N usa `port_range_start..port_range_start + RANGE_STEP`. Si
+    /// vale 0, el job aun no tiene rango asignado (estado legacy o tests).
+    /// Se asigna por `port_alloc::assign_next_range` al crear el job.
+    #[serde(default)]
+    pub port_range_start: u16,
 }
 
 impl Job {
@@ -66,6 +72,7 @@ impl Job {
             status: JobStatus::Idle,
             files_changed: 0,
             last_activity: SystemTime::now(),
+            port_range_start: 0,
         }
     }
 
@@ -86,6 +93,7 @@ impl Job {
             status: JobStatus::Idle,
             files_changed: 0,
             last_activity: SystemTime::now(),
+            port_range_start: 0,
         }
     }
 
@@ -103,6 +111,7 @@ impl Job {
                 status: JobStatus::Idle,
                 files_changed: 3,
                 last_activity: now - Duration::from_secs(2 * 60),
+                port_range_start: 0,
             },
             Job {
                 id: "job-2".into(),
@@ -115,6 +124,7 @@ impl Job {
                 status: JobStatus::Thinking,
                 files_changed: 0,
                 last_activity: now,
+                port_range_start: 0,
             },
             Job {
                 id: "job-3".into(),
@@ -127,6 +137,7 @@ impl Job {
                 status: JobStatus::NeedsAttention,
                 files_changed: 1,
                 last_activity: now - Duration::from_secs(15 * 60),
+                port_range_start: 0,
             },
             Job {
                 id: "job-4".into(),
@@ -139,6 +150,7 @@ impl Job {
                 status: JobStatus::Paused,
                 files_changed: 0,
                 last_activity: now - Duration::from_secs(26 * 60 * 60),
+                port_range_start: 0,
             },
         ]
     }
@@ -260,6 +272,7 @@ mod tests {
             status,
             files_changed,
             last_activity,
+            port_range_start: 0,
         }
     }
 
