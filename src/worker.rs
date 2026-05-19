@@ -81,6 +81,7 @@ fn create_worktree_blocking(req: &CreateWorktreeRequest) -> Result<Job> {
         status: JobStatus::Idle,
         files_changed: 0,
         last_activity: SystemTime::now(),
+        port_range_start: 0,
     })
 }
 

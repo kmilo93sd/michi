@@ -8,6 +8,7 @@
 pub mod app;
 pub mod claude_config;
 pub mod git;
+pub mod port_alloc;
 pub mod port_detector;
 pub mod state;
 pub mod system;
