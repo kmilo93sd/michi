@@ -384,9 +384,13 @@ impl App {
     }
 
     fn push_status_targets(&self) {
+        // Solo polleamos status sobre worktrees reales. Sesiones in-place
+        // (workspace/directo) comparten cwd con cambios pre-existentes y
+        // contar archivos no significa nada para el agente.
         let targets: Vec<StatusPollTarget> = self
             .jobs
             .iter()
+            .filter(|j| !j.is_in_place_session())
             .map(|j| StatusPollTarget {
                 job_id: j.id.clone(),
                 worktree_path: j.worktree_path.clone(),
@@ -1725,22 +1729,33 @@ fn render_job_header(ui: &mut egui::Ui, job: &Job, theme: &Theme) -> JobPaneOutc
             ui.strong(title);
             ui.label(job.worktree_path.to_string_lossy().replace('\\', "/"));
             ui.horizontal(|ui| {
-                ui.label(format!("{} archivos modificados", job.files_changed));
+                // En sesiones in-place el conteo de archivos no significa
+                // nada (cwd compartido con cambios pre-existentes), asi que
+                // lo omitimos. Solo se muestra en worktrees reales.
+                if !job.is_in_place_session() {
+                    ui.label(format!("{} archivos modificados", job.files_changed));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .button("X")
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Cerrar trabajo y eliminar worktree")
+                        .on_hover_text("Cerrar trabajo")
                         .clicked()
                     {
                         outcome.close_clicked = true;
                     }
-                    let _ = ui
-                        .button("Commit & Push")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    let _ = ui
-                        .button("Diff")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    // Botones Diff y Commit&Push solo aplican a worktrees
+                    // reales (el cwd in-place puede estar fuera de git o
+                    // tener cambios cross-repo). Para in-place, le pides a
+                    // Claude que haga commit por ti.
+                    if !job.is_in_place_session() {
+                        let _ = ui
+                            .button("Commit & Push")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        let _ = ui
+                            .button("Diff")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    }
                 });
             });
         });

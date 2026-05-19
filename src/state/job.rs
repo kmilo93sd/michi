@@ -153,18 +153,39 @@ impl Job {
     }
 
     pub fn subtitle(&self) -> String {
+        // En sesiones in-place (workspace / directo) NO contamos archivos
+        // modificados: `git status` sobre el cwd cuenta cambios pre-existentes
+        // y cross-repo que NO son del agente. La filosofia de michi es
+        // enfocarse en agentes, no en archivos.
+        let show_files = !self.is_in_place_session();
         match self.status {
             JobStatus::NeedsAttention => "permiso pendiente".into(),
-            JobStatus::Thinking => format!("{} cambios \u{B7} pensando", self.files_changed),
-            JobStatus::Paused => {
-                format!("pausado \u{B7} {}", humanize_elapsed(self.last_activity))
+            JobStatus::Thinking => {
+                if show_files {
+                    format!("{} cambios \u{B7} pensando", self.files_changed)
+                } else {
+                    "pensando".into()
+                }
             }
-            JobStatus::Error => format!("{} cambios \u{B7} error", self.files_changed),
-            JobStatus::Idle => format!(
-                "{} cambios \u{B7} {}",
-                self.files_changed,
-                humanize_elapsed(self.last_activity)
-            ),
+            JobStatus::Paused => format!("pausado \u{B7} {}", humanize_elapsed(self.last_activity)),
+            JobStatus::Error => {
+                if show_files {
+                    format!("{} cambios \u{B7} error", self.files_changed)
+                } else {
+                    "error".into()
+                }
+            }
+            JobStatus::Idle => {
+                if show_files {
+                    format!(
+                        "{} cambios \u{B7} {}",
+                        self.files_changed,
+                        humanize_elapsed(self.last_activity)
+                    )
+                } else {
+                    humanize_elapsed(self.last_activity)
+                }
+            }
         }
     }
 }
@@ -332,6 +353,45 @@ mod tests {
         let a = Job::for_direct_session("ws", "repo", &path);
         let b = Job::for_direct_session("ws", "repo", &path);
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn subtitle_in_place_idle_omits_files_count() {
+        // En sesion in-place no cuenta archivos; mide cosas pre-existentes.
+        let job = Job::for_workspace_session("ws", &PathBuf::from("/w"));
+        let subtitle = job.subtitle();
+        assert!(
+            !subtitle.contains("cambios"),
+            "in-place idle no debe mostrar conteo de archivos, fue: {subtitle:?}"
+        );
+    }
+
+    #[test]
+    fn subtitle_in_place_thinking_says_pensando_solo() {
+        let mut job = Job::for_workspace_session("ws", &PathBuf::from("/w"));
+        job.status = JobStatus::Thinking;
+        job.files_changed = 58; // valor "envenenado" simulando git status sucio
+        assert_eq!(job.subtitle(), "pensando");
+    }
+
+    #[test]
+    fn subtitle_in_place_error_says_error_solo() {
+        let mut job = Job::for_direct_session("ws", "repo", &PathBuf::from("/r"));
+        job.status = JobStatus::Error;
+        job.files_changed = 99;
+        assert_eq!(job.subtitle(), "error");
+    }
+
+    #[test]
+    fn subtitle_worktree_sigue_mostrando_cambios() {
+        // Para jobs con worktree real, los cambios SI son del agente porque
+        // el worktree es exclusivo de la sesion.
+        let job = job_with(JobStatus::Idle, 3, SystemTime::now());
+        assert!(
+            job.subtitle().contains("3 cambios"),
+            "worktree real conserva el badge, fue: {:?}",
+            job.subtitle()
+        );
     }
 
     #[test]
