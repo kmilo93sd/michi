@@ -1027,7 +1027,8 @@ impl App {
                         } else {
                             for job in ws_jobs {
                                 let selected = self.selected_job_id.as_deref() == Some(&job.id);
-                                let outcome = render_job_card(ui, job, selected, &self.theme);
+                                let env = self.env_for_job(job);
+                                let outcome = render_job_card(ui, job, selected, &self.theme, &env);
                                 if outcome.clicked {
                                     clicked_id = Some(job.id.clone());
                                 }
@@ -1597,10 +1598,23 @@ struct JobCardOutcome {
     menu_pick: Option<JobMenu>,
 }
 
-fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool, theme: &Theme) -> JobCardOutcome {
+fn render_job_card(
+    ui: &mut egui::Ui,
+    job: &Job,
+    selected: bool,
+    theme: &Theme,
+    env: &BTreeMap<String, String>,
+) -> JobCardOutcome {
     let full_width = ui.available_width();
+
+    // Linea opcional de puertos: ":4100 API · :4101 WEB · :4102 POSTGRES".
+    // Solo se muestra cuando hay env vars de puerto (rango asignado +
+    // workspace tiene slots detectados).
+    let ports_line = ports_one_liner(env);
+    let extra_height = if ports_line.is_some() { 14.0 } else { 0.0 };
+
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(full_width, theme.card_row_height),
+        egui::vec2(full_width, theme.card_row_height + extra_height),
         egui::Sense::click(),
     );
 
@@ -1675,11 +1689,46 @@ fn render_job_card(ui: &mut egui::Ui, job: &Job, selected: bool, theme: &Theme) 
         child.label(subtitle_text.weak());
     }
 
+    // Linea opcional de puertos asignados. Tooltip al hover muestra el
+    // detalle env_var=value para debugging.
+    if let Some(line) = ports_line {
+        let label_resp = child.label(
+            egui::RichText::new(line)
+                .small()
+                .color(theme.text_muted)
+                .monospace(),
+        );
+        label_resp.on_hover_text(ports_tooltip(env));
+    }
+
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     JobCardOutcome {
         clicked: response.clicked(),
         menu_pick,
     }
+}
+
+/// Linea compacta de puertos para mostrar en la card del job. Formato:
+/// `:4100 API · :4101 WEB · :4102 POSTGRES`. Devuelve None si no hay env
+/// vars de puerto.
+fn ports_one_liner(env: &BTreeMap<String, String>) -> Option<String> {
+    if env.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = env
+        .iter()
+        .map(|(var, val)| format!(":{} {}", val, port_detector::slot_name(var)))
+        .collect();
+    Some(parts.join(" \u{B7} "))
+}
+
+/// Tooltip detallado: lista completa `VAR=VALOR` por linea.
+fn ports_tooltip(env: &BTreeMap<String, String>) -> String {
+    let mut lines = vec!["Env vars inyectadas al PTY:".to_string()];
+    for (var, val) in env {
+        lines.push(format!("  {var}={val}"));
+    }
+    lines.join("\n")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
