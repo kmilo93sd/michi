@@ -51,15 +51,16 @@ fn build_backend_settings(
     }
 }
 
-/// Devuelve el shell por defecto del sistema:
-/// - Windows: `cmd.exe`
-/// - Unix: `$SHELL` o `/bin/bash` como fallback
+/// Comando que arranca en cada job nuevo: `claude` (Claude Code CLI).
+///
+/// michi es un orquestador de Claude Code; cada PTY embebido corre el CLI
+/// `claude` directamente. Para que esto funcione el binario tiene que estar
+/// en `PATH` del proceso que lanza michi.
+///
+/// Si quieres una shell normal (cmd.exe, bash) para un job especifico, lo
+/// arrancas DESDE Claude — pero el default del producto es Claude.
 pub fn default_shell() -> String {
-    if cfg!(windows) {
-        "cmd.exe".to_string()
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-    }
+    "claude".to_string()
 }
 
 #[cfg(test)]
@@ -86,30 +87,18 @@ mod tests {
     }
 
     #[test]
-    fn default_shell_is_non_empty() {
-        let s = default_shell();
-        assert!(!s.is_empty());
+    fn default_shell_is_claude() {
+        // michi es un orquestador de Claude Code: cada PTY arranca
+        // directamente `claude`, no una shell generica.
+        assert_eq!(default_shell(), "claude");
     }
 
-    #[cfg(windows)]
     #[test]
-    fn default_shell_on_windows_is_cmd() {
-        assert_eq!(default_shell(), "cmd.exe");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn default_shell_on_unix_falls_back_to_bin_bash() {
-        // SAFETY: el test es single-threaded para tocar env vars.
-        let original = std::env::var("SHELL").ok();
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
-        assert_eq!(default_shell(), "/bin/bash");
-        if let Some(v) = original {
-            unsafe {
-                std::env::set_var("SHELL", v);
-            }
-        }
+    fn default_shell_is_consistent_across_platforms() {
+        // Antes el binario cambiaba entre OS (cmd.exe vs bash). Ahora es el
+        // mismo en todos lados porque depende del CLI de Claude, no del OS.
+        let first = default_shell();
+        let second = default_shell();
+        assert_eq!(first, second);
     }
 }
