@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 
 use crate::claude_config::{self, ClaudeInventory};
 use crate::port_alloc;
+use crate::port_detector;
 use crate::state::{self, AppState, Job, JobStatus, Workspace};
 use crate::system;
 use crate::terminal::{self, JobTerminal};
@@ -168,12 +169,14 @@ impl App {
             let job = self.jobs.iter().find(|j| j.id == job_id)?.clone();
             let backend_id = self.next_backend_id;
             self.next_backend_id += 1;
+            let env = self.env_for_job(&job);
             match JobTerminal::spawn(
                 backend_id,
                 ctx.clone(),
                 self.pty_tx.clone(),
                 &terminal::default_shell(),
                 vec![],
+                &env,
                 &job.worktree_path,
             ) {
                 Ok(t) => {
@@ -187,6 +190,29 @@ impl App {
             }
         }
         self.terminals.get_mut(job_id)
+    }
+
+    /// Computa el mapa de env vars para inyectar al PTY del job. Por ahora
+    /// solo aplica a sesiones de workspace (in-place), porque ahi vive el
+    /// `port_detector` que detecta `.env*` del workspace. Si el job tiene
+    /// `port_range_start=0` (legacy/sin asignar), devuelve un map vacio.
+    fn env_for_job(&self, job: &Job) -> BTreeMap<String, String> {
+        let mut env = BTreeMap::new();
+        if job.port_range_start == 0 {
+            return env;
+        }
+        let Some(ws) = self.workspaces.iter().find(|w| w.name == job.workspace) else {
+            return env;
+        };
+        let repo_paths: Vec<_> = ws.repos.iter().map(|r| r.path.clone()).collect();
+        let slots = port_detector::detect_ports(&ws.path, &repo_paths);
+        // A cada slot detectado le toca un offset secuencial sobre el rango
+        // base del job: slot[0] -> range_start, slot[1] -> range_start+1, ...
+        for (idx, slot) in slots.iter().enumerate() {
+            let port = job.port_range_start.saturating_add(idx as u16);
+            env.insert(slot.env_var.clone(), port.to_string());
+        }
+        env
     }
 
     /// Modal "¿Sesion directa o nuevo worktree?". Soporta dos modos:
