@@ -36,6 +36,9 @@ pub struct App {
     status_targets_tx: Sender<Vec<StatusPollTarget>>,
     dirty_since: Option<Instant>,
     close_confirm: Option<CloseConfirm>,
+    /// Pendiente de eleccion: el usuario hizo click en ▶ de un repo y debe
+    /// decidir si abrir sesion directa o worktree nuevo.
+    start_choice: Option<StartChoice>,
     /// Un terminal por job-id. Lazy: se crea cuando el job se renderiza por
     /// primera vez. Drop del backend cierra el PTY automaticamente.
     terminals: HashMap<String, JobTerminal>,
@@ -44,6 +47,23 @@ pub struct App {
     /// Contador incremental para asignar id numerico unico a cada
     /// TerminalBackend (egui_term lo requiere para enrutar eventos).
     next_backend_id: u64,
+}
+
+/// El usuario hizo click en ▶ de un workspace o repo. Mostrar dialogo
+/// "directa | worktree". Si `repo` es `None`, el usuario inicio desde el
+/// workspace header (sesion directa = cwd workspace, worktree = elegir repo).
+/// Si es `Some(..)`, ya tiene el repo elegido.
+struct StartChoice {
+    workspace_id: String,
+    workspace_name: String,
+    workspace_path: std::path::PathBuf,
+    repo: Option<RepoChoice>,
+}
+
+struct RepoChoice {
+    id: String,
+    name: String,
+    path: std::path::PathBuf,
 }
 
 /// Estado del modal de confirmacion para cerrar un job con cambios pendientes.
@@ -56,6 +76,12 @@ struct CloseConfirm {
 
 enum CloseConfirmAction {
     Force,
+    Cancel,
+}
+
+enum StartChoiceAction {
+    Direct,
+    Worktree,
     Cancel,
 }
 
@@ -84,6 +110,7 @@ impl App {
             status_targets_tx,
             dirty_since: None,
             close_confirm: None,
+            start_choice: None,
             terminals: HashMap::new(),
             pty_tx,
             pty_rx,
@@ -124,6 +151,189 @@ impl App {
             }
         }
         self.terminals.get_mut(job_id)
+    }
+
+    /// Modal "¿Sesion directa o nuevo worktree?". Soporta dos modos:
+    /// - Sin repo (click en ▶ del workspace): directa = cwd workspace,
+    ///   worktree = abrir modal Nuevo trabajo con workspace pre-llenado
+    ///   (usuario elige repo + branch).
+    /// - Con repo (click en ▶ de un repo): directa = cwd repo,
+    ///   worktree = abrir modal con workspace+repo pre-llenados.
+    fn render_start_choice(&mut self, ctx: &egui::Context) {
+        let Some(choice) = self.start_choice.as_ref() else {
+            return;
+        };
+        let workspace_id = choice.workspace_id.clone();
+        let workspace_name = choice.workspace_name.clone();
+        let workspace_path = choice.workspace_path.clone();
+        let repo = choice.repo.as_ref().map(|r| RepoChoice {
+            id: r.id.clone(),
+            name: r.name.clone(),
+            path: r.path.clone(),
+        });
+        let scope_label = match &repo {
+            Some(r) => format!("{} / {}", workspace_name, r.name),
+            None => format!("{} (workspace)", workspace_name),
+        };
+        let direct_tooltip = if repo.is_some() {
+            "Claude corre en el repo tal cual, sin crear branch nueva."
+        } else {
+            "Claude corre en el workspace con acceso a todos los repos hijos. Sin git operations."
+        };
+        let direct_subline = if repo.is_some() {
+            "Claude corre en la branch actual del repo, sin worktree separado."
+        } else {
+            "Claude tiene contexto del workspace completo (todos los repos)."
+        };
+        let worktree_tooltip = if repo.is_some() {
+            "Crea una rama nueva y un git worktree dedicado en este repo."
+        } else {
+            "Abre el modal Nuevo trabajo con el workspace pre-llenado. Eliges repo y branch."
+        };
+        let worktree_subline = if repo.is_some() {
+            "Abre el modal con workspace y repo pre-llenados."
+        } else {
+            "Abre el modal con workspace pre-llenado. Eliges el repo."
+        };
+
+        let theme = &self.theme;
+        let frame = egui::Frame::new()
+            .fill(theme.bg_surface)
+            .inner_margin(egui::Margin::same(20))
+            .corner_radius(egui::CornerRadius::same(8))
+            .stroke(egui::Stroke::new(1.0, theme.border));
+
+        let mut action: Option<StartChoiceAction> = None;
+        let modal_response = egui::Modal::new(egui::Id::new("start_choice_modal"))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.style_mut().visuals = theme.build_visuals();
+                ui.spacing_mut().button_padding = egui::vec2(14.0, 10.0);
+                ui.set_min_width(460.0);
+                ui.set_max_width(580.0);
+
+                ui.heading("Iniciar trabajo");
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(scope_label).color(theme.text_muted));
+                ui.add_space(16.0);
+
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 56.0],
+                        egui::Button::new(
+                            egui::RichText::new("Sesion directa")
+                                .strong()
+                                .color(theme.text_primary),
+                        ),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(direct_tooltip)
+                    .clicked()
+                {
+                    action = Some(StartChoiceAction::Direct);
+                }
+                ui.add_space(6.0);
+                ui.small(egui::RichText::new(direct_subline).color(theme.text_muted));
+
+                ui.add_space(14.0);
+
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 56.0],
+                        egui::Button::new(
+                            egui::RichText::new("Nuevo worktree (rama nueva)")
+                                .strong()
+                                .color(theme.text_primary),
+                        ),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(worktree_tooltip)
+                    .clicked()
+                {
+                    action = Some(StartChoiceAction::Worktree);
+                }
+                ui.add_space(6.0);
+                ui.small(egui::RichText::new(worktree_subline).color(theme.text_muted));
+
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("Cancelar")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            action = Some(StartChoiceAction::Cancel);
+                        }
+                    });
+                });
+            });
+
+        if modal_response.backdrop_response.clicked() {
+            action = Some(StartChoiceAction::Cancel);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            action = Some(StartChoiceAction::Cancel);
+        }
+
+        match action {
+            Some(StartChoiceAction::Direct) => {
+                self.start_choice = None;
+                match repo {
+                    Some(r) => self.start_direct_session(&workspace_name, &r.name, &r.path),
+                    None => self.start_workspace_session(&workspace_name, &workspace_path),
+                }
+            }
+            Some(StartChoiceAction::Worktree) => {
+                self.start_choice = None;
+                let repo_id_opt = repo.as_ref().map(|r| r.id.clone());
+                self.open_new_job_modal_for_scope(&workspace_id, repo_id_opt.as_deref());
+            }
+            Some(StartChoiceAction::Cancel) => {
+                self.start_choice = None;
+            }
+            None => {}
+        }
+    }
+
+    /// Inicia una sesion de workspace: claude corre en workspace.path con
+    /// acceso a todos los repos hijos. No hay git worktree.
+    fn start_workspace_session(&mut self, workspace_name: &str, workspace_path: &std::path::Path) {
+        let job = Job::for_workspace_session(workspace_name, workspace_path);
+        let id = job.id.clone();
+        self.jobs.push(job);
+        self.selected_job_id = Some(id);
+        self.last_error = None;
+        self.mark_dirty();
+        self.push_status_targets();
+    }
+
+    /// Inicia una sesion directa para el repo: crea un Job sin worktree
+    /// separado (worktree_path = repo_path). El terminal embebido se spawneara
+    /// lazy en repo_path la proxima vez que se renderice el job.
+    fn start_direct_session(
+        &mut self,
+        workspace_name: &str,
+        repo_name: &str,
+        repo_path: &std::path::Path,
+    ) {
+        let job = Job::for_direct_session(workspace_name, repo_name, repo_path);
+        let id = job.id.clone();
+        self.jobs.push(job);
+        self.selected_job_id = Some(id);
+        self.last_error = None;
+        self.mark_dirty();
+        self.push_status_targets();
+    }
+
+    /// El usuario eligio "Nuevo worktree" en el modal de eleccion: pre-llena
+    /// el modal "Nuevo trabajo" con el workspace y (opcionalmente) repo.
+    fn open_new_job_modal_for_scope(&mut self, workspace_id: &str, repo_id: Option<&str>) {
+        self.new_job_modal_state = NewJobModalState::initial();
+        self.new_job_modal_state.workspace_id = Some(workspace_id.to_string());
+        self.new_job_modal_state.repo_id = repo_id.map(str::to_string);
+        self.last_error = None;
+        self.new_job_modal_open = true;
     }
 
     /// Drena eventos PTY. Hoy solo loguea y limpia backends muertos; en
@@ -561,6 +771,7 @@ impl eframe::App for App {
         }
 
         self.render_close_confirm(ui.ctx());
+        self.render_start_choice(ui.ctx());
 
         if self.new_job_modal_open {
             let action = new_job_modal::show(
@@ -626,6 +837,7 @@ impl App {
         let mut toggle_ws: Option<String> = None;
         let mut toggle_repo: Option<String> = None;
         let mut add_workspace_clicked = false;
+        let mut start_choice_for: Option<StartChoice> = None;
 
         // Clone para evitar lifetime acrobatics: el loop necesita iterar workspaces
         // y simultaneamente leer self.collapsed_workspaces y jobs_for_repo.
@@ -637,8 +849,17 @@ impl App {
                 for ws in &workspaces {
                     ui.add_space(8.0);
                     let ws_collapsed = self.collapsed_workspaces.contains(&ws.id);
-                    if workspace_header(ui, &self.theme, ws, ws_collapsed).clicked() {
+                    let ws_outcome = workspace_header(ui, &self.theme, ws, ws_collapsed);
+                    if ws_outcome.toggle_clicked {
                         toggle_ws = Some(ws.id.clone());
+                    }
+                    if ws_outcome.play_clicked {
+                        start_choice_for = Some(StartChoice {
+                            workspace_id: ws.id.clone(),
+                            workspace_name: ws.name.clone(),
+                            workspace_path: ws.path.clone(),
+                            repo: None,
+                        });
                     }
 
                     if !ws_collapsed {
@@ -646,16 +867,27 @@ impl App {
                             let repo_collapsed = self.collapsed_repos.contains(&repo.id);
                             let repo_jobs = self.jobs_for_repo(&ws.name, &repo.name);
 
-                            if repo_header(
+                            let header_outcome = repo_header(
                                 ui,
                                 &self.theme,
                                 &repo.name,
                                 repo_collapsed,
                                 repo_jobs.len(),
-                            )
-                            .clicked()
-                            {
+                            );
+                            if header_outcome.toggle_clicked {
                                 toggle_repo = Some(repo.id.clone());
+                            }
+                            if header_outcome.play_clicked {
+                                start_choice_for = Some(StartChoice {
+                                    workspace_id: ws.id.clone(),
+                                    workspace_name: ws.name.clone(),
+                                    workspace_path: ws.path.clone(),
+                                    repo: Some(RepoChoice {
+                                        id: repo.id.clone(),
+                                        name: repo.name.clone(),
+                                        path: repo.path.clone(),
+                                    }),
+                                });
                             }
 
                             if !repo_collapsed {
@@ -709,7 +941,18 @@ impl App {
         if add_workspace_clicked {
             self.pick_and_add_workspace();
         }
+        if let Some(choice) = start_choice_for {
+            self.start_choice = Some(choice);
+        }
     }
+}
+
+/// Resultado de interactuar con el header de un workspace.
+struct WorkspaceHeaderOutcome {
+    /// Toggle de colapsado (click en chevron + nombre).
+    toggle_clicked: bool,
+    /// El usuario hizo click en ▶ → quiere iniciar un trabajo en este workspace.
+    play_clicked: bool,
 }
 
 fn workspace_header(
@@ -717,14 +960,14 @@ fn workspace_header(
     theme: &Theme,
     ws: &Workspace,
     collapsed: bool,
-) -> egui::Response {
+) -> WorkspaceHeaderOutcome {
     let full_width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(
+    let (rect, area_response) = ui.allocate_exact_size(
         egui::vec2(full_width, theme.workspace_header_height),
-        egui::Sense::click(),
+        egui::Sense::hover(),
     );
 
-    if response.hovered() {
+    if area_response.hovered() {
         ui.painter().rect_filled(rect, 4.0, theme.bg_card_hover);
     }
 
@@ -736,11 +979,40 @@ fn workspace_header(
             .layout(egui::Layout::top_down(egui::Align::LEFT)),
     );
 
-    child.label(
-        egui::RichText::new(format!("{} {}", chevron, ws.name.to_uppercase()))
-            .small()
-            .color(theme.text_workspace_label),
-    );
+    // Linea 1: chevron + nombre (toggle) + ▶ (play, solo en hover)
+    let mut play_clicked = false;
+    let toggle_clicked = child
+        .horizontal(|ui| {
+            let resp = ui
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("{} {}", chevron, ws.name.to_uppercase()))
+                            .small()
+                            .color(theme.text_workspace_label),
+                    )
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if area_response.hovered() {
+                ui.add_space(6.0);
+                let play_resp = ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("\u{25B6}").small().color(theme.accent),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Iniciar trabajo en este workspace");
+                if play_resp.clicked() {
+                    play_clicked = true;
+                }
+            }
+            resp.clicked()
+        })
+        .inner;
+
+    // Linea 2: subtitulo con specs y skills
     child.label(
         egui::RichText::new(format!(
             "{} specs \u{B7} {} skills",
@@ -750,7 +1022,19 @@ fn workspace_header(
         .color(theme.text_muted),
     );
 
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    WorkspaceHeaderOutcome {
+        toggle_clicked,
+        play_clicked,
+    }
+}
+
+/// Resultado de interactuar con el header de un repo.
+struct RepoHeaderOutcome {
+    /// El usuario hizo click en el area del header (chevron + nombre) →
+    /// toggle de colapsado.
+    toggle_clicked: bool,
+    /// El usuario hizo click en ▶ → quiere iniciar un trabajo en este repo.
+    play_clicked: bool,
 }
 
 fn repo_header(
@@ -759,14 +1043,14 @@ fn repo_header(
     name: &str,
     collapsed: bool,
     job_count: usize,
-) -> egui::Response {
+) -> RepoHeaderOutcome {
     let full_width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(
+    let (rect, area_response) = ui.allocate_exact_size(
         egui::vec2(full_width, theme.repo_header_height),
-        egui::Sense::click(),
+        egui::Sense::hover(),
     );
 
-    if response.hovered() {
+    if area_response.hovered() {
         ui.painter().rect_filled(rect, 4.0, theme.bg_card_hover);
     }
 
@@ -780,17 +1064,44 @@ fn repo_header(
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
 
-    child.label(egui::RichText::new(format!("{} {}", chevron, name)).color(theme.text_repo_label));
-    if job_count > 0 {
+    let toggle_resp = child.add(
+        egui::Label::new(
+            egui::RichText::new(format!("{} {}", chevron, name)).color(theme.text_repo_label),
+        )
+        .sense(egui::Sense::click()),
+    );
+    let toggle_resp = toggle_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    // Boton ▶ visible solo en hover del row (Linear-style: revela acciones)
+    let mut play_clicked = false;
+    if area_response.hovered() {
         child.add_space(8.0);
-        child.label(
-            egui::RichText::new(format!("{}", job_count))
-                .small()
-                .color(theme.text_muted),
-        );
+        let play_resp = child
+            .add(
+                egui::Button::new(egui::RichText::new("\u{25B6}").small().color(theme.accent))
+                    .frame(false),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Iniciar trabajo en este repo");
+        if play_resp.clicked() {
+            play_clicked = true;
+        }
     }
 
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    if job_count > 0 {
+        child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(format!("{}", job_count))
+                    .small()
+                    .color(theme.text_muted),
+            );
+        });
+    }
+
+    RepoHeaderOutcome {
+        toggle_clicked: toggle_resp.clicked(),
+        play_clicked,
+    }
 }
 
 fn paint_tree_line(ui: &egui::Ui, rect: egui::Rect, theme: &Theme, offset_x: f32) {

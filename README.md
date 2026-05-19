@@ -5,8 +5,13 @@
 <h1 align="center">michi</h1>
 
 <p align="center">
-  A native Rust control panel for running multiple Claude Code instances in
-  parallel, each in its own isolated <code>git worktree</code>.
+  AI-native development environment for orchestrating multiple Claude Code
+  instances in parallel, each in its own isolated <code>git worktree</code>.
+</p>
+
+<p align="center">
+  Not an IDE. michi doesn't edit code — Claude does. michi is the cockpit
+  that runs many Claudes side by side without them stepping on each other.
 </p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
