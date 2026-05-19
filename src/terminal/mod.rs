@@ -4,7 +4,18 @@
 //! dentro de `App` en un `HashMap<JobId, JobTerminal>` y se crea perezosamente
 //! la primera vez que el job se renderiza. La PTY se cierra cuando se hace
 //! `drop` del backend (al cerrar el job, p.ej.).
+//!
+//! ## Env vars per-PTY
+//!
+//! `BackendSettings` de egui_term solo expone `shell`, `args`,
+//! `working_directory` — sin un campo de env vars. Para que cada PTY arranque
+//! con variables distintas (puertos asignados por sesion), envolvemos el
+//! comando objetivo en un shell wrapper que setea las vars antes de
+//! invocarlo: `cmd.exe /c "set X=1 && claude"` en Windows, `bash -c
+//! "X=1 exec claude"` en Unix. Esto agrega un proceso intermedio chico pero
+//! es portable y libre de race conditions (vs `std::env::set_var`).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 
@@ -18,22 +29,62 @@ pub struct JobTerminal {
 }
 
 impl JobTerminal {
-    /// Crea un terminal nuevo para el job. `shell_command` es el binario que
-    /// se va a ejecutar dentro del PTY (e.g. `cmd.exe`, `bash`, `claude`).
-    /// `working_directory` es la ruta donde el PTY debe arrancar.
+    /// Crea un terminal nuevo para el job. `command` es el binario que se va
+    /// a ejecutar dentro del PTY (e.g. `claude`). `env` se inyecta como env
+    /// vars del proceso via shell wrapper (ver doc del modulo).
     pub fn spawn(
         backend_id: u64,
         ctx: egui::Context,
         pty_tx: Sender<(u64, PtyEvent)>,
-        shell_command: &str,
+        command: &str,
         args: Vec<String>,
+        env: &BTreeMap<String, String>,
         working_directory: &Path,
     ) -> Result<Self> {
-        let settings = build_backend_settings(shell_command, args, working_directory);
+        let (shell, shell_args) = compose_command_with_env(command, &args, env);
+        let settings = build_backend_settings(&shell, shell_args, working_directory);
         let backend = TerminalBackend::new(backend_id, ctx, pty_tx, settings)
             .map_err(|e| anyhow::anyhow!("creando TerminalBackend: {e}"))
             .context("spawning PTY backend")?;
         Ok(Self { backend })
+    }
+}
+
+/// Compone el `(shell, args)` final para arrancar `command` con las env vars
+/// dadas. Si `env` esta vacio, devuelve `(command, args)` directo sin shell
+/// wrapper. Si hay vars, envuelve en `cmd.exe /c` (Windows) o `bash -c`
+/// (Unix) con las vars pre-seteadas.
+pub fn compose_command_with_env(
+    command: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> (String, Vec<String>) {
+    if env.is_empty() {
+        return (command.to_string(), args.to_vec());
+    }
+    if cfg!(windows) {
+        let mut script = String::new();
+        for (k, v) in env {
+            script.push_str(&format!("set {k}={v}&& "));
+        }
+        script.push_str(command);
+        for a in args {
+            script.push(' ');
+            script.push_str(a);
+        }
+        ("cmd.exe".to_string(), vec!["/c".into(), script])
+    } else {
+        let mut script = String::new();
+        for (k, v) in env {
+            script.push_str(&format!("{k}={v} "));
+        }
+        script.push_str("exec ");
+        script.push_str(command);
+        for a in args {
+            script.push(' ');
+            script.push_str(a);
+        }
+        ("bash".to_string(), vec!["-c".into(), script])
     }
 }
 
@@ -100,5 +151,61 @@ mod tests {
         let first = default_shell();
         let second = default_shell();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn compose_without_env_returns_command_directly() {
+        let env = BTreeMap::new();
+        let (shell, args) = compose_command_with_env("claude", &[], &env);
+        assert_eq!(shell, "claude");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn compose_without_env_preserves_args() {
+        let env = BTreeMap::new();
+        let (shell, args) =
+            compose_command_with_env("claude", &["--name".into(), "x".into()], &env);
+        assert_eq!(shell, "claude");
+        assert_eq!(args, vec!["--name", "x"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn compose_with_env_on_windows_uses_cmd_set() {
+        let mut env = BTreeMap::new();
+        env.insert("PORT_API".into(), "4100".into());
+        env.insert("PORT_WEB".into(), "4101".into());
+        let (shell, args) = compose_command_with_env("claude", &[], &env);
+        assert_eq!(shell, "cmd.exe");
+        assert_eq!(args[0], "/c");
+        // BTreeMap es ordenado por key alfabeticamente → PORT_API antes que PORT_WEB
+        assert_eq!(args[1], "set PORT_API=4100&& set PORT_WEB=4101&& claude");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_with_env_on_unix_uses_bash_inline() {
+        let mut env = BTreeMap::new();
+        env.insert("PORT_API".into(), "4100".into());
+        env.insert("PORT_WEB".into(), "4101".into());
+        let (shell, args) = compose_command_with_env("claude", &[], &env);
+        assert_eq!(shell, "bash");
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], "PORT_API=4100 PORT_WEB=4101 exec claude");
+    }
+
+    #[test]
+    fn compose_with_env_keeps_keys_sorted_for_determinism() {
+        let mut env = BTreeMap::new();
+        env.insert("ZED".into(), "9".into());
+        env.insert("ALPHA".into(), "1".into());
+        env.insert("BETA".into(), "2".into());
+        let (_, args) = compose_command_with_env("claude", &[], &env);
+        let script = &args[1];
+        let alpha_pos = script.find("ALPHA").unwrap();
+        let beta_pos = script.find("BETA").unwrap();
+        let zed_pos = script.find("ZED").unwrap();
+        assert!(alpha_pos < beta_pos && beta_pos < zed_pos);
     }
 }
