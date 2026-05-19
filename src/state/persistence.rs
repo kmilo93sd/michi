@@ -28,9 +28,6 @@ pub struct AppState {
 
     #[serde(default)]
     pub collapsed_workspaces: HashSet<String>,
-
-    #[serde(default)]
-    pub collapsed_repos: HashSet<String>,
 }
 
 impl AppState {
@@ -103,6 +100,7 @@ mod tests {
                 claude_md_present: true,
                 specs_count: 3,
                 skills_count: 1,
+                prep_dismissed: false,
                 repos: vec![Repo {
                     id: "repo-a".into(),
                     name: "alpha-app".into(),
@@ -123,7 +121,6 @@ mod tests {
             }],
             selected_job_id: Some("job-1".into()),
             collapsed_workspaces: collapsed_ws,
-            collapsed_repos: HashSet::new(),
         }
     }
 
@@ -134,7 +131,6 @@ mod tests {
         assert!(s.jobs.is_empty());
         assert!(s.selected_job_id.is_none());
         assert!(s.collapsed_workspaces.is_empty());
-        assert!(s.collapsed_repos.is_empty());
     }
 
     #[test]
