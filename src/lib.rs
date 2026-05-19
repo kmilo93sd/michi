@@ -6,6 +6,7 @@
 //! exercised through tests instead of going through "dead code" purgatory.
 
 pub mod app;
+pub mod claude_config;
 pub mod git;
 pub mod state;
 pub mod system;

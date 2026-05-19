@@ -6,6 +6,7 @@ use eframe::CreationContext;
 use egui_term::{PtyEvent, TerminalView};
 use tracing::{debug, warn};
 
+use crate::claude_config::{self, ClaudeInventory};
 use crate::state::{self, AppState, Job, JobStatus, Workspace};
 use crate::system;
 use crate::terminal::{self, JobTerminal};
@@ -50,6 +51,10 @@ pub struct App {
     /// Contador incremental para asignar id numerico unico a cada
     /// TerminalBackend (egui_term lo requiere para enrutar eventos).
     next_backend_id: u64,
+    /// Inventario global de `~/.claude/` (skills, agents, MCPs). Se lee
+    /// una sola vez al boot porque no cambia con frecuencia. Si cambia,
+    /// el usuario tiene que reabrir michi.
+    claude_globals: ClaudeInventory,
 }
 
 /// El usuario hizo click en ▶ de un workspace o repo. Mostrar dialogo
@@ -144,6 +149,7 @@ impl App {
             pty_tx,
             pty_rx,
             next_backend_id: 1,
+            claude_globals: claude_config::read_globals(),
         };
         app.push_status_targets();
         app
@@ -937,7 +943,14 @@ impl App {
                     // Un solo inspect por workspace por frame. Lo reusamos
                     // para el check verde del header y el banner de bare.
                     let status = workspace_prep::inspect(&ws.path);
-                    let ws_outcome = workspace_header(ui, &self.theme, ws, &status, ws_collapsed);
+                    // Inventario sumado de Claude para este workspace (globales
+                    // + workspace + repos). Los globales son cacheados en el
+                    // App; workspace/repos son file stats baratos.
+                    let repo_paths: Vec<_> = ws.repos.iter().map(|r| r.path.clone()).collect();
+                    let totals =
+                        claude_config::totals_for(&ws.path, &repo_paths, &self.claude_globals);
+                    let ws_outcome =
+                        workspace_header(ui, &self.theme, ws, &status, &totals, ws_collapsed);
                     if ws_outcome.toggle_clicked {
                         toggle_ws = Some(ws.id.clone());
                     }
@@ -1195,6 +1208,7 @@ fn workspace_header(
     theme: &Theme,
     ws: &Workspace,
     status: &workspace_prep::WorkspacePreparationStatus,
+    totals: &claude_config::WorkspaceTotals,
     collapsed: bool,
 ) -> WorkspaceHeaderOutcome {
     let full_width = ui.available_width();
@@ -1256,18 +1270,54 @@ fn workspace_header(
         dot_rect = Some(egui::Rect::from_min_size(dot_origin, dot_size));
     }
 
-    // Linea 2: subtitulo specs + skills.
-    let subtitle = format!("{} specs \u{B7} {} skills", ws.specs_count, ws.skills_count);
-    painter.text(
-        egui::pos2(
-            rect.min.x + 8.0,
-            rect.min.y + 6.0 + title_galley.size().y + 2.0,
-        ),
-        egui::Align2::LEFT_TOP,
-        subtitle,
-        font_small.clone(),
+    // Linea 2: subtitulo con totales de skills / MCPs / specs. Cada segmento
+    // se pinta por separado para poder atarle un sub-rect con tooltip
+    // breakdown propio (workspace + globales + repos).
+    let subtitle_y = rect.min.y + 6.0 + title_galley.size().y + 2.0;
+    let mut cursor_x = rect.min.x + 8.0;
+    let separator = " \u{B7} ";
+
+    let skills_text = format!("{} skills", totals.total_skills());
+    let skills_galley = painter.layout_no_wrap(skills_text, font_small.clone(), theme.text_muted);
+    let skills_size = skills_galley.size();
+    painter.galley(
+        egui::pos2(cursor_x, subtitle_y),
+        skills_galley,
         theme.text_muted,
     );
+    let skills_rect = egui::Rect::from_min_size(egui::pos2(cursor_x, subtitle_y), skills_size);
+    cursor_x += skills_size.x;
+
+    let sep1 = painter.layout_no_wrap(separator.into(), font_small.clone(), theme.text_muted);
+    let sep1_size = sep1.size();
+    painter.galley(egui::pos2(cursor_x, subtitle_y), sep1, theme.text_muted);
+    cursor_x += sep1_size.x;
+
+    let mcps_text = format!("{} MCPs", totals.total_mcps());
+    let mcps_galley = painter.layout_no_wrap(mcps_text, font_small.clone(), theme.text_muted);
+    let mcps_size = mcps_galley.size();
+    painter.galley(
+        egui::pos2(cursor_x, subtitle_y),
+        mcps_galley,
+        theme.text_muted,
+    );
+    let mcps_rect = egui::Rect::from_min_size(egui::pos2(cursor_x, subtitle_y), mcps_size);
+    cursor_x += mcps_size.x;
+
+    let sep2 = painter.layout_no_wrap(separator.into(), font_small.clone(), theme.text_muted);
+    let sep2_size = sep2.size();
+    painter.galley(egui::pos2(cursor_x, subtitle_y), sep2, theme.text_muted);
+    cursor_x += sep2_size.x;
+
+    let specs_text = format!("{} specs", ws.specs_count);
+    let specs_galley = painter.layout_no_wrap(specs_text, font_small.clone(), theme.text_muted);
+    let specs_size = specs_galley.size();
+    painter.galley(
+        egui::pos2(cursor_x, subtitle_y),
+        specs_galley,
+        theme.text_muted,
+    );
+    let specs_rect = egui::Rect::from_min_size(egui::pos2(cursor_x, subtitle_y), specs_size);
 
     // Boton "+": pintado como texto centrado en plus_rect. Color sutil en
     // idle, accent cuando el row esta hovered.
@@ -1303,6 +1353,26 @@ fn workspace_header(
         )
         .on_hover_text(workspace_status_summary(status));
     }
+
+    // Tooltip breakdown por cada metrica del subtitulo.
+    ui.interact(
+        skills_rect,
+        egui::Id::new(("ws_skills_hover", &ws.id)),
+        egui::Sense::hover(),
+    )
+    .on_hover_text(skills_breakdown(totals));
+    ui.interact(
+        mcps_rect,
+        egui::Id::new(("ws_mcps_hover", &ws.id)),
+        egui::Sense::hover(),
+    )
+    .on_hover_text(mcps_breakdown(totals));
+    ui.interact(
+        specs_rect,
+        egui::Id::new(("ws_specs_hover", &ws.id)),
+        egui::Sense::hover(),
+    )
+    .on_hover_text("Subdirs en specs/ del workspace");
 
     // Determinar intencion del click izquierdo por posicion del cursor.
     let mut play_clicked = false;
@@ -1352,6 +1422,51 @@ fn workspace_header(
         play_clicked,
         menu_pick,
     }
+}
+
+/// Tooltip breakdown del total de skills: workspace + globales + repos.
+fn skills_breakdown(totals: &claude_config::WorkspaceTotals) -> String {
+    let mut lines = Vec::new();
+    if totals.workspace.skills > 0 {
+        lines.push(format!(
+            "{} del workspace (.claude/skills)",
+            totals.workspace.skills
+        ));
+    }
+    if totals.repos.skills > 0 {
+        lines.push(format!("{} de repos hijos", totals.repos.skills));
+    }
+    if totals.globals.skills > 0 {
+        lines.push(format!(
+            "{} globales (~/.claude/skills)",
+            totals.globals.skills
+        ));
+    }
+    if lines.is_empty() {
+        return "Sin skills disponibles".into();
+    }
+    lines.join("\n")
+}
+
+/// Tooltip breakdown del total de MCPs: workspace + globales (con sus nombres).
+fn mcps_breakdown(totals: &claude_config::WorkspaceTotals) -> String {
+    let mut sections = Vec::new();
+    if !totals.workspace.mcp_names.is_empty() {
+        sections.push(format!(
+            "Del workspace (.mcp.json):\n  {}",
+            totals.workspace.mcp_names.join(", ")
+        ));
+    }
+    if !totals.globals.mcp_names.is_empty() {
+        sections.push(format!(
+            "Globales (~/.claude.json):\n  {}",
+            totals.globals.mcp_names.join(", ")
+        ));
+    }
+    if sections.is_empty() {
+        return "Sin MCPs configurados".into();
+    }
+    sections.join("\n\n")
 }
 
 /// Resumen humano para el tooltip del check verde "workspace configurado".
