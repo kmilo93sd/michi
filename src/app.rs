@@ -1198,109 +1198,154 @@ fn workspace_header(
     collapsed: bool,
 ) -> WorkspaceHeaderOutcome {
     let full_width = ui.available_width();
-    let (rect, area_response) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         egui::vec2(full_width, theme.workspace_header_height),
         egui::Sense::click(),
     );
 
-    // Usamos contains_pointer en vez de hovered: hovered se hace false cuando
-    // el cursor entra en un widget hijo con sense propio (el boton "+"), lo
-    // que provocaba flicker cuando el "+" aparecia/desaparecia.
-    let row_hovered = area_response.contains_pointer();
+    // El header se pinta ENTERO via painter (text + shapes), sin sub-widgets.
+    // Asi todo el rect queda asociado a UN solo response → el click izquierdo,
+    // el click derecho (context_menu) y el hover funcionan en CUALQUIER zona
+    // del row, incluyendo zonas vacias entre el texto y el "+". Antes los
+    // `ui.label()` hijos capturaban el hover y robaban el secondary_clicked,
+    // dejando zonas muertas para click derecho.
+    let row_hovered = response.contains_pointer();
     if row_hovered {
         ui.painter().rect_filled(rect, 4.0, theme.bg_card_hover);
     }
-    // Cursor pointer en todo el row indica que es interactivo (toggle).
-    let area_response = area_response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
-    // Mismo menu se asigna al row entero Y al "+": el "+" es un widget hijo
-    // con Sense::click(), asi que el cursor sobre el "+" hace que egui le
-    // direccione el secondary_clicked al "+" y NO al row padre. Para que el
-    // click derecho funcione en cualquier zona del row (incluyendo el "+"),
-    // adjuntamos el mismo menu en ambos targets.
+    // Sub-rect del "+", anclado a la derecha. La interaccion (play vs toggle)
+    // se decide por geometria al final, no por widget hijo. Tamaño 22x22.
+    let plus_size = 22.0;
+    let plus_margin_right = 6.0;
+    let plus_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            rect.max.x - plus_margin_right - plus_size,
+            rect.center().y - plus_size / 2.0,
+        ),
+        egui::vec2(plus_size, plus_size),
+    );
+
+    // Pintar contenido del header con el painter del Ui (no son widgets).
+    let painter = ui.painter().clone();
+    let font_small = egui::FontId::monospace(theme.font_mono_size - 1.0);
+    let font_plus = egui::FontId::monospace(16.0);
+
+    // Linea 1: chevron + nombre del workspace (caps).
+    let chevron = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
+    let title = format!("{} {}", chevron, ws.name.to_uppercase());
+    let title_pos = egui::pos2(rect.min.x + 8.0, rect.min.y + 6.0);
+    let title_galley =
+        painter.layout_no_wrap(title, font_small.clone(), theme.text_workspace_label);
+    painter.galley(title_pos, title_galley.clone(), theme.text_workspace_label);
+
+    // Dot verde "configurado" justo despues del titulo (solo si no es bare).
+    // Memorizamos el rect aproximado del dot para mostrar tooltip al hover.
+    let mut dot_rect: Option<egui::Rect> = None;
+    if !status.is_bare() {
+        let dot_anchor = egui::pos2(
+            title_pos.x + title_galley.size().x + 6.0,
+            title_pos.y + title_galley.size().y / 2.0,
+        );
+        let dot_galley =
+            painter.layout_no_wrap("\u{25CF}".into(), font_small.clone(), theme.status_idle);
+        let dot_size = dot_galley.size();
+        let dot_origin = egui::pos2(dot_anchor.x, dot_anchor.y - dot_size.y / 2.0);
+        painter.galley(dot_origin, dot_galley, theme.status_idle);
+        dot_rect = Some(egui::Rect::from_min_size(dot_origin, dot_size));
+    }
+
+    // Linea 2: subtitulo specs + skills.
+    let subtitle = format!("{} specs \u{B7} {} skills", ws.specs_count, ws.skills_count);
+    painter.text(
+        egui::pos2(
+            rect.min.x + 8.0,
+            rect.min.y + 6.0 + title_galley.size().y + 2.0,
+        ),
+        egui::Align2::LEFT_TOP,
+        subtitle,
+        font_small.clone(),
+        theme.text_muted,
+    );
+
+    // Boton "+": pintado como texto centrado en plus_rect. Color sutil en
+    // idle, accent cuando el row esta hovered.
+    let plus_color = if row_hovered {
+        theme.accent
+    } else {
+        theme.text_muted
+    };
+    painter.text(
+        plus_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "\u{002B}",
+        font_plus,
+        plus_color,
+    );
+
+    // Tooltips para los sub-rects pintados (plus button + dot verde). Como
+    // no son widgets reales, materializamos un response "virtual" con
+    // Sense::hover sobre cada sub-rect via `ui.interact`. Hover NO captura
+    // clicks (solo Sense::click lo hace), asi que el row sigue siendo el
+    // unico target de los clicks/context_menu.
+    ui.interact(
+        plus_rect,
+        egui::Id::new(("ws_plus_hover", &ws.id)),
+        egui::Sense::hover(),
+    )
+    .on_hover_text("Iniciar trabajo en este workspace");
+    if let Some(dr) = dot_rect {
+        ui.interact(
+            dr,
+            egui::Id::new(("ws_dot_hover", &ws.id)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(workspace_status_summary(status));
+    }
+
+    // Determinar intencion del click izquierdo por posicion del cursor.
+    let mut play_clicked = false;
+    let mut toggle_clicked = false;
+    if response.clicked() {
+        let on_plus = response
+            .interact_pointer_pos()
+            .is_some_and(|p| plus_rect.contains(p));
+        if on_plus {
+            play_clicked = true;
+        } else {
+            toggle_clicked = true;
+        }
+    }
+
+    // context_menu en el response del row entero. Sin sub-widgets, captura
+    // el secondary_click en cualquier zona — incluyendo sobre el texto y
+    // sobre el sub-rect del "+".
     let mut menu_pick: Option<WorkspaceMenu> = None;
-    let menu_builder = |ui: &mut egui::Ui, picked: &mut Option<WorkspaceMenu>| {
+    response.context_menu(|ui| {
         if ui.button("Sesion directa del workspace").clicked() {
-            *picked = Some(WorkspaceMenu::DirectSession);
+            menu_pick = Some(WorkspaceMenu::DirectSession);
             ui.close_kind(egui::UiKind::Menu);
         }
         if ui.button("Nuevo trabajo (worktree)").clicked() {
-            *picked = Some(WorkspaceMenu::NewWorktree);
+            menu_pick = Some(WorkspaceMenu::NewWorktree);
             ui.close_kind(egui::UiKind::Menu);
         }
         ui.separator();
         if ui.button("Preparar workspace").clicked() {
-            *picked = Some(WorkspaceMenu::PrepareWorkspace);
+            menu_pick = Some(WorkspaceMenu::PrepareWorkspace);
             ui.close_kind(egui::UiKind::Menu);
         }
         if ui.button("Abrir carpeta").clicked() {
-            *picked = Some(WorkspaceMenu::OpenFolder);
+            menu_pick = Some(WorkspaceMenu::OpenFolder);
             ui.close_kind(egui::UiKind::Menu);
         }
         ui.separator();
         if ui.button("Quitar workspace").clicked() {
-            *picked = Some(WorkspaceMenu::Remove);
+            menu_pick = Some(WorkspaceMenu::Remove);
             ui.close_kind(egui::UiKind::Menu);
         }
-    };
-    area_response.context_menu(|ui| menu_builder(ui, &mut menu_pick));
-
-    let chevron = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
-    let inner = rect.shrink2(egui::vec2(6.0, 4.0));
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(inner)
-            .layout(egui::Layout::top_down(egui::Align::LEFT)),
-    );
-
-    // Linea 1: chevron + nombre + dot de "configurado" a la izquierda,
-    // "+" pegado a la derecha. El "+" esta SIEMPRE renderizado (sin
-    // parpadeo). El dot verde aparece solo cuando el workspace no es bare.
-    let mut play_clicked = false;
-    child.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!("{} {}", chevron, ws.name.to_uppercase()))
-                .small()
-                .color(theme.text_workspace_label),
-        );
-        if !status.is_bare() {
-            ui.add_space(4.0);
-            // U+25CF (filled circle) en lugar de checkmark: la fuente
-            // monoespaciada del sidebar lo renderiza, el checkmark caia en
-            // tofu. Color verde idle = mismo lenguaje visual que los status
-            // dots de jobs activos.
-            ui.label(
-                egui::RichText::new("\u{25CF}")
-                    .small()
-                    .color(theme.status_idle),
-            )
-            .on_hover_text(workspace_status_summary(status));
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (plus_clicked, plus_response) =
-                plus_button(ui, theme, row_hovered, "Iniciar trabajo en este workspace");
-            plus_response.context_menu(|ui| menu_builder(ui, &mut menu_pick));
-            if plus_clicked {
-                play_clicked = true;
-            }
-        });
     });
-
-    // Linea 2: subtitulo con specs y skills
-    child.label(
-        egui::RichText::new(format!(
-            "{} specs \u{B7} {} skills",
-            ws.specs_count, ws.skills_count
-        ))
-        .small()
-        .color(theme.text_muted),
-    );
-
-    // Toggle = click izquierdo en cualquier parte del row que no haya sido
-    // capturada por el "+". Como el "+" se agrega despues del area_response,
-    // egui priorizara su sense cuando el cursor este sobre el, y el row solo
-    // recibira clicks fuera de el.
-    let toggle_clicked = area_response.clicked();
 
     WorkspaceHeaderOutcome {
         toggle_clicked,
@@ -1337,37 +1382,6 @@ fn workspace_status_summary(status: &workspace_prep::WorkspacePreparationStatus)
         "Sin repo git."
     };
     format!("Workspace configurado:\n{detected}\n{git_line}")
-}
-
-/// Boton "+" reutilizable: presencia constante, color sutil en idle y accent
-/// cuando el row padre esta hovereado. Devuelve `(clicked, response)`. El
-/// caller usa `response` para adjuntar `context_menu` (asi el click derecho
-/// sobre el "+" abre el mismo menu que sobre el resto del row).
-fn plus_button(
-    ui: &mut egui::Ui,
-    theme: &Theme,
-    row_hovered: bool,
-    tooltip: &str,
-) -> (bool, egui::Response) {
-    let color = if row_hovered {
-        theme.accent
-    } else {
-        theme.text_muted
-    };
-    let resp = ui
-        .add(
-            egui::Button::new(
-                egui::RichText::new("\u{002B}")
-                    .strong()
-                    .color(color)
-                    .size(16.0),
-            )
-            .frame(false)
-            .min_size(egui::vec2(22.0, 22.0)),
-        )
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tooltip);
-    (resp.clicked(), resp)
 }
 
 /// Banner inline que aparece bajo el header de un workspace pelado.
