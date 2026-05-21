@@ -9,7 +9,7 @@
 //! funcion pura testeable; el shell-out es un wrapper delgado encima.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Estado de Docker en la maquina, desde el punto de vista de michi.
@@ -219,6 +219,28 @@ pub fn plan_launch(docker: &DockerStatus, spec: &ContainerSpec) -> LaunchPlan {
             working_directory: spec.worktree_host.clone(),
         }
     }
+}
+
+/// Imagen base del contenedor segun el lenguaje detectado en el repo, por
+/// archivos marcadores. Imagenes oficiales **slim** (todas glibc, no alpine,
+/// para que el binario de claude montado corra). Fallback `debian:stable-slim`.
+/// Liviano a proposito: nada de base universal monstruo (10GB+).
+pub fn detect_base_image(repo_path: &Path) -> String {
+    // Orden = prioridad. Marcadores mas especificos del runtime principal primero.
+    const MARKERS: [(&str, &str); 6] = [
+        ("Cargo.toml", "rust:slim"),
+        ("package.json", "node:slim"),
+        ("pyproject.toml", "python:slim"),
+        ("requirements.txt", "python:slim"),
+        ("go.mod", "golang:bookworm"),
+        ("Gemfile", "ruby:slim"),
+    ];
+    for (marker, image) in MARKERS {
+        if repo_path.join(marker).is_file() {
+            return image.to_string();
+        }
+    }
+    "debian:stable-slim".to_string()
 }
 
 #[cfg(test)]
@@ -431,5 +453,50 @@ mod tests {
         let plan = plan_launch(&docker, &spec);
         assert_eq!(plan.command, "claude");
         assert!(plan.args.is_empty());
+    }
+
+    fn touch(dir: &Path, name: &str) {
+        std::fs::write(dir.join(name), "x").unwrap();
+    }
+
+    #[test]
+    fn image_rust_for_cargo_toml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(tmp.path(), "Cargo.toml");
+        assert_eq!(detect_base_image(tmp.path()), "rust:slim");
+    }
+
+    #[test]
+    fn image_node_for_package_json() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(tmp.path(), "package.json");
+        assert_eq!(detect_base_image(tmp.path()), "node:slim");
+    }
+
+    #[test]
+    fn image_python_for_pyproject_or_requirements() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(tmp.path(), "requirements.txt");
+        assert_eq!(detect_base_image(tmp.path()), "python:slim");
+
+        let tmp2 = tempfile::TempDir::new().unwrap();
+        touch(tmp2.path(), "pyproject.toml");
+        assert_eq!(detect_base_image(tmp2.path()), "python:slim");
+    }
+
+    #[test]
+    fn image_fallback_debian_for_unknown() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(detect_base_image(tmp.path()), "debian:stable-slim");
+    }
+
+    #[test]
+    fn image_rust_wins_over_node_when_both_present() {
+        // Prioridad por orden de marcadores: un repo Rust con tooling node
+        // (scripts) sigue siendo Rust.
+        let tmp = tempfile::TempDir::new().unwrap();
+        touch(tmp.path(), "Cargo.toml");
+        touch(tmp.path(), "package.json");
+        assert_eq!(detect_base_image(tmp.path()), "rust:slim");
     }
 }
