@@ -1814,7 +1814,14 @@ fn render_detected_card(
 ) {
     let full_width = ui.available_width();
     let has_resources = sess.resources.process_count > 0;
-    let extra_height = if has_resources { 14.0 } else { 0.0 };
+    let has_chips = !sess.breakdown.is_empty();
+    let mut extra_height = 0.0;
+    if has_resources {
+        extra_height += 14.0;
+    }
+    if has_chips {
+        extra_height += 22.0;
+    }
     let (rect, _response) = ui.allocate_exact_size(
         egui::vec2(full_width, theme.card_row_height + extra_height),
         egui::Sense::hover(),
@@ -1882,6 +1889,42 @@ fn render_detected_card(
             .color(theme.text_muted),
         );
     }
+
+    // Linea 4 opcional: chips de procesos notables (shells, runtimes, docker).
+    if has_chips {
+        child.add_space(2.0);
+        child.horizontal(|ui| {
+            let b = &sess.breakdown;
+            if b.shells > 0 {
+                let txt = if b.shells == 1 {
+                    "1 shell".to_string()
+                } else {
+                    format!("{} shells", b.shells)
+                };
+                render_chip(ui, &txt, theme.text_muted, theme);
+            }
+            for rt in &b.runtimes {
+                render_chip(ui, rt, theme.accent, theme);
+            }
+            if b.has_docker {
+                render_chip(ui, "docker", theme.status_needs_attention, theme);
+            }
+        });
+    }
+}
+
+/// Dibuja un "chip" / pill: rect redondeado con fondo sutil + texto pequeno.
+/// `text_color` permite codificar la categoria (runtimes en accent, docker
+/// en azul, shells en muted).
+fn render_chip(ui: &mut egui::Ui, text: &str, text_color: egui::Color32, theme: &Theme) {
+    egui::Frame::new()
+        .fill(theme.bg_card_hover)
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .corner_radius(egui::CornerRadius::same(6))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(text).small().color(text_color));
+        });
+    ui.add_space(4.0);
 }
 
 /// Acorta un uuid largo para mostrar: "f570160f-..." en vez del id completo.

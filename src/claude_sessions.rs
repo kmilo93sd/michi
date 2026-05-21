@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::resource_monitor::{self, ProcInfo, SessionResources};
+use crate::resource_monitor::{self, ProcInfo, ProcessBreakdown, SessionResources};
 
 /// Estado que Claude Code reporta para una sesion en
 /// `~/.claude/sessions/<pid>.json`. Es el estado REAL (lo emite el propio
@@ -108,6 +108,8 @@ pub struct DetectedSession {
     pub resume_id: Option<String>,
     /// Recursos agregados del arbol de procesos de la sesion.
     pub resources: SessionResources,
+    /// Desglose de procesos notables del arbol (shells, runtimes, docker).
+    pub breakdown: ProcessBreakdown,
     /// Estado real reportado por Claude (`~/.claude/sessions/<pid>.json`).
     /// `Unknown` si no se pudo leer el sessions file.
     pub status: ClaudeStatus,
@@ -158,6 +160,7 @@ pub fn detect_sessions(all: &[ProcInfo]) -> Vec<DetectedSession> {
                 cwd: p.cwd.clone(),
                 resume_id: extract_resume_id(&p.cmd),
                 resources: resource_monitor::aggregate(&subtree),
+                breakdown: resource_monitor::classify_processes(&subtree),
                 status,
             }
         })

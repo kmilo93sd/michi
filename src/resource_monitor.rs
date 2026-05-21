@@ -90,6 +90,84 @@ pub fn aggregate(subtree: &[ProcInfo]) -> SessionResources {
     }
 }
 
+/// Desglose de los procesos "notables" del arbol de una sesion: cuantos
+/// shells abrio, que runtimes/servers levanto, y si esta usando docker.
+/// Es lo que michi muestra como chips en la card ("1 shell · node · docker").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessBreakdown {
+    /// Cantidad de procesos shell (bash, cmd, powershell, etc).
+    pub shells: usize,
+    /// Runtimes/servers unicos detectados, ordenados ("node", "python").
+    pub runtimes: Vec<String>,
+    /// Hay algun proceso docker en el arbol.
+    pub has_docker: bool,
+}
+
+/// Clasifica el arbol de procesos en shells / runtimes / docker. Funcion
+/// pura. Ignora ruido (claude, conhost, el shell wrapper de michi, etc) —
+/// solo cuenta lo que le importa al usuario para entender que levanto la
+/// sesion.
+pub fn classify_processes(subtree: &[ProcInfo]) -> ProcessBreakdown {
+    use std::collections::BTreeSet;
+    let mut shells = 0usize;
+    let mut runtimes: BTreeSet<String> = BTreeSet::new();
+    let mut has_docker = false;
+    for p in subtree {
+        let base = normalize_proc_name(&p.name);
+        if is_shell(&base) {
+            shells += 1;
+        } else if base.contains("docker") {
+            has_docker = true;
+        } else if let Some(rt) = runtime_label(&base) {
+            runtimes.insert(rt.to_string());
+        }
+    }
+    ProcessBreakdown {
+        shells,
+        runtimes: runtimes.into_iter().collect(),
+        has_docker,
+    }
+}
+
+/// Normaliza el nombre del proceso: minusculas y sin extension `.exe`.
+fn normalize_proc_name(name: &str) -> String {
+    let lower = name.to_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
+fn is_shell(base: &str) -> bool {
+    matches!(
+        base,
+        "bash" | "sh" | "zsh" | "fish" | "cmd" | "powershell" | "pwsh"
+    )
+}
+
+/// Devuelve la etiqueta de runtime/server si el proceso es uno conocido.
+/// `None` para procesos que no son runtimes notables.
+fn runtime_label(base: &str) -> Option<&'static str> {
+    match base {
+        "node" => Some("node"),
+        "deno" => Some("deno"),
+        "bun" => Some("bun"),
+        "python" | "python3" | "py" => Some("python"),
+        "ruby" => Some("ruby"),
+        "php" => Some("php"),
+        "java" => Some("java"),
+        "go" => Some("go"),
+        "dotnet" => Some("dotnet"),
+        "postgres" | "postgresql" => Some("postgres"),
+        "redis-server" | "redis" => Some("redis"),
+        _ => None,
+    }
+}
+
+impl ProcessBreakdown {
+    /// `true` si no hay nada notable que mostrar.
+    pub fn is_empty(&self) -> bool {
+        self.shells == 0 && self.runtimes.is_empty() && !self.has_docker
+    }
+}
+
 /// Lee TODOS los procesos del sistema via sysinfo. Glue fina sobre el OS.
 /// Refresca solo lo necesario (procesos + memoria) para ser barato.
 pub fn snapshot_all_processes() -> Vec<ProcInfo> {
@@ -251,6 +329,82 @@ mod tests {
             total_memory_bytes: 240 * 1024 * 1024,
         };
         assert_eq!(r.memory_human(), "240 MB");
+    }
+
+    fn named(pid: u32, name: &str) -> ProcInfo {
+        ProcInfo {
+            pid,
+            parent_pid: None,
+            name: name.to_string(),
+            memory_bytes: 10,
+            cwd: None,
+            cmd: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn classify_counts_shells() {
+        let tree = vec![
+            named(1, "claude.exe"),
+            named(2, "bash"),
+            named(3, "cmd.exe"),
+            named(4, "powershell.exe"),
+        ];
+        let b = classify_processes(&tree);
+        assert_eq!(b.shells, 3, "bash + cmd + powershell");
+    }
+
+    #[test]
+    fn classify_detects_runtimes_unique_sorted() {
+        let tree = vec![
+            named(1, "node.exe"),
+            named(2, "node.exe"),
+            named(3, "python.exe"),
+        ];
+        let b = classify_processes(&tree);
+        assert_eq!(b.runtimes, vec!["node".to_string(), "python".to_string()]);
+    }
+
+    #[test]
+    fn classify_detects_docker() {
+        let tree = vec![named(1, "claude.exe"), named(2, "com.docker.backend.exe")];
+        let b = classify_processes(&tree);
+        assert!(b.has_docker);
+    }
+
+    #[test]
+    fn classify_ignores_noise() {
+        // claude, conhost, procesos random no cuentan.
+        let tree = vec![
+            named(1, "claude.exe"),
+            named(2, "conhost.exe"),
+            named(3, "explorer.exe"),
+        ];
+        let b = classify_processes(&tree);
+        assert!(b.is_empty(), "nada notable, fue: {b:?}");
+    }
+
+    #[test]
+    fn classify_postgres_and_redis_as_runtimes() {
+        let tree = vec![named(1, "postgres"), named(2, "redis-server")];
+        let b = classify_processes(&tree);
+        assert!(b.runtimes.contains(&"postgres".to_string()));
+        assert!(b.runtimes.contains(&"redis".to_string()));
+    }
+
+    #[test]
+    fn classify_full_mix() {
+        let tree = vec![
+            named(1, "claude.exe"),
+            named(2, "bash"),
+            named(3, "node.exe"),
+            named(4, "docker.exe"),
+        ];
+        let b = classify_processes(&tree);
+        assert_eq!(b.shells, 1);
+        assert_eq!(b.runtimes, vec!["node".to_string()]);
+        assert!(b.has_docker);
+        assert!(!b.is_empty());
     }
 
     #[test]
