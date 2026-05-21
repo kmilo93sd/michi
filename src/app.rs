@@ -387,15 +387,19 @@ impl App {
             .filter_map(|v| v.parse::<u16>().ok())
             .map(|p| (p, p))
             .collect();
-        let creds_host = dirs::home_dir()
-            .map(|h| h.join(".claude").join(".credentials.json"))
+        let claude_home_host = dirs::home_dir()
+            .map(|h| h.join(".claude"))
+            .filter(|p| p.is_dir());
+        let claude_json_host = dirs::home_dir()
+            .map(|h| h.join(".claude.json"))
             .filter(|p| p.is_file());
 
         let spec = docker::ContainerSpec {
             name: format!("michi-{}", job.id),
             image: docker::detect_base_image(&job.worktree_path),
             worktree_host: job.worktree_path.clone(),
-            creds_host,
+            claude_home_host,
+            claude_json_host,
             ports,
             env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             memory: Some("4g".to_string()),
