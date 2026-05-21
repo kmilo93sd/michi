@@ -10,7 +10,91 @@
 
 use std::path::PathBuf;
 
+use serde::Deserialize;
+
 use crate::resource_monitor::{self, ProcInfo, SessionResources};
+
+/// Estado que Claude Code reporta para una sesion en
+/// `~/.claude/sessions/<pid>.json`. Es el estado REAL (lo emite el propio
+/// Claude), mas confiable que parsear el output del PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeStatus {
+    /// Pensando / generando.
+    Busy,
+    /// Libre, esperando que le des una tarea.
+    Idle,
+    /// Esperando tu permiso o input (la que necesita tu atencion).
+    Waiting,
+    /// Corriendo un comando de shell.
+    Shell,
+    /// Estado desconocido o sin sessions file.
+    Unknown,
+}
+
+impl ClaudeStatus {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "busy" => ClaudeStatus::Busy,
+            "idle" => ClaudeStatus::Idle,
+            "waiting" => ClaudeStatus::Waiting,
+            "shell" => ClaudeStatus::Shell,
+            _ => ClaudeStatus::Unknown,
+        }
+    }
+
+    /// Texto corto para mostrar en la card.
+    pub fn label(self) -> &'static str {
+        match self {
+            ClaudeStatus::Busy => "pensando",
+            ClaudeStatus::Idle => "libre",
+            ClaudeStatus::Waiting => "esperando permiso",
+            ClaudeStatus::Shell => "ejecutando",
+            ClaudeStatus::Unknown => "?",
+        }
+    }
+}
+
+/// Metadata de una sesion leida de `~/.claude/sessions/<pid>.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMeta {
+    pub session_id: String,
+    pub cwd: Option<PathBuf>,
+    pub status: ClaudeStatus,
+    pub started_at_ms: u64,
+}
+
+/// Parsea el JSON de un sessions file. Funcion pura, testeable.
+pub fn parse_session_meta(json: &str) -> Option<SessionMeta> {
+    #[derive(Deserialize)]
+    struct Raw {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        cwd: Option<String>,
+        #[serde(default)]
+        status: String,
+        #[serde(rename = "startedAt", default)]
+        started_at: u64,
+    }
+    let raw: Raw = serde_json::from_str(json).ok()?;
+    Some(SessionMeta {
+        session_id: raw.session_id,
+        cwd: raw.cwd.map(PathBuf::from),
+        status: ClaudeStatus::parse(&raw.status),
+        started_at_ms: raw.started_at,
+    })
+}
+
+/// Lee `~/.claude/sessions/<pid>.json` para un PID. Glue sobre el FS.
+/// Devuelve None si no existe o no parsea.
+pub fn read_session_meta(pid: u32) -> Option<SessionMeta> {
+    let home = dirs::home_dir()?;
+    let path = home
+        .join(".claude")
+        .join("sessions")
+        .join(format!("{pid}.json"));
+    let raw = std::fs::read_to_string(path).ok()?;
+    parse_session_meta(&raw)
+}
 
 /// Una sesion de Claude Code detectada en el sistema.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +108,9 @@ pub struct DetectedSession {
     pub resume_id: Option<String>,
     /// Recursos agregados del arbol de procesos de la sesion.
     pub resources: SessionResources,
+    /// Estado real reportado por Claude (`~/.claude/sessions/<pid>.json`).
+    /// `Unknown` si no se pudo leer el sessions file.
+    pub status: ClaudeStatus,
 }
 
 /// `true` si el proceso es el CLI de Claude Code (no la app de escritorio
@@ -56,17 +143,22 @@ pub fn extract_resume_id(cmd: &[String]) -> Option<String> {
 }
 
 /// Detecta todas las sesiones de Claude CLI en el snapshot de procesos.
-/// Para cada una agrega los recursos de su arbol de descendientes.
+/// Para cada una agrega los recursos de su arbol de descendientes y lee el
+/// estado real desde `~/.claude/sessions/<pid>.json`.
 pub fn detect_sessions(all: &[ProcInfo]) -> Vec<DetectedSession> {
     all.iter()
         .filter(|p| is_claude_cli(&p.name, &p.cmd))
         .map(|p| {
             let subtree = resource_monitor::collect_subtree(all, p.pid);
+            let status = read_session_meta(p.pid)
+                .map(|m| m.status)
+                .unwrap_or(ClaudeStatus::Unknown);
             DetectedSession {
                 pid: p.pid,
                 cwd: p.cwd.clone(),
                 resume_id: extract_resume_id(&p.cmd),
                 resources: resource_monitor::aggregate(&subtree),
+                status,
             }
         })
         .collect()
@@ -84,6 +176,60 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn claude_status_parse_known_values() {
+        assert_eq!(ClaudeStatus::parse("busy"), ClaudeStatus::Busy);
+        assert_eq!(ClaudeStatus::parse("idle"), ClaudeStatus::Idle);
+        assert_eq!(ClaudeStatus::parse("waiting"), ClaudeStatus::Waiting);
+        assert_eq!(ClaudeStatus::parse("shell"), ClaudeStatus::Shell);
+    }
+
+    #[test]
+    fn claude_status_parse_unknown_is_unknown() {
+        assert_eq!(ClaudeStatus::parse("frobnicating"), ClaudeStatus::Unknown);
+        assert_eq!(ClaudeStatus::parse(""), ClaudeStatus::Unknown);
+    }
+
+    #[test]
+    fn parse_session_meta_real_shape() {
+        // Forma real de ~/.claude/sessions/<pid>.json.
+        let json = r#"{"pid":3696,"sessionId":"4ec52303-5a7e-4396","cwd":"C:\\Users\\kmilo\\Documents\\projects\\lelemon-workspace","startedAt":1779080494956,"version":"2.1.143","status":"busy","updatedAt":1779372738817}"#;
+        let meta = parse_session_meta(json).unwrap();
+        assert_eq!(meta.session_id, "4ec52303-5a7e-4396");
+        assert_eq!(meta.status, ClaudeStatus::Busy);
+        assert_eq!(meta.started_at_ms, 1779080494956);
+        assert_eq!(
+            meta.cwd,
+            Some(PathBuf::from(
+                "C:\\Users\\kmilo\\Documents\\projects\\lelemon-workspace"
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_session_meta_waiting_status() {
+        let json = r#"{"sessionId":"abc","cwd":"/x","status":"waiting","startedAt":1}"#;
+        let meta = parse_session_meta(json).unwrap();
+        assert_eq!(meta.status, ClaudeStatus::Waiting);
+    }
+
+    #[test]
+    fn parse_session_meta_invalid_json_is_none() {
+        assert!(parse_session_meta("{not json").is_none());
+    }
+
+    #[test]
+    fn parse_session_meta_missing_session_id_is_none() {
+        // sessionId es obligatorio para identificar la sesion.
+        assert!(parse_session_meta(r#"{"status":"idle"}"#).is_none());
+    }
+
+    #[test]
+    fn parse_session_meta_missing_status_defaults_unknown() {
+        let meta = parse_session_meta(r#"{"sessionId":"x","cwd":"/y"}"#).unwrap();
+        assert_eq!(meta.status, ClaudeStatus::Unknown);
     }
 
     #[test]
