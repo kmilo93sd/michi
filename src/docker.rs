@@ -8,6 +8,7 @@
 //! La parte determinista (clasificar la salida de `docker version`) es una
 //! funcion pura testeable; el shell-out es un wrapper delgado encima.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -161,6 +162,63 @@ pub fn build_run_args(spec: &ContainerSpec) -> Vec<String> {
     args.extend(spec.command.iter().cloned());
 
     args
+}
+
+/// Como termino lanzandose una sesion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchMode {
+    /// Dentro de un contenedor Docker (modo preferido).
+    Container,
+    /// Nativa en el host (fallback cuando no hay Docker).
+    Native,
+}
+
+/// Plan concreto para lanzar una sesion via PTY. Mapea 1:1 a los parametros de
+/// `terminal::JobTerminal::spawn` (command, args, env, working_directory).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchPlan {
+    /// En que modo se resolvio (para mostrarlo en la UI).
+    pub mode: LaunchMode,
+    /// Programa a spawnear: `docker` en contenedor, el comando real en nativo.
+    pub command: String,
+    /// Argumentos del programa.
+    pub args: Vec<String>,
+    /// Env vars a inyectar via shell wrapper. Vacio en contenedor (las vars van
+    /// por `-e` dentro de los args de `docker run`).
+    pub env: BTreeMap<String, String>,
+    /// Working dir del PTY.
+    pub working_directory: PathBuf,
+}
+
+/// Decide como lanzar la sesion: en contenedor si Docker esta disponible, o
+/// nativa (worktree + comando directo) como fallback. Implementa la
+/// degradacion de la regla 4 (Docker preferido, no requerido). Funcion pura.
+pub fn plan_launch(docker: &DockerStatus, spec: &ContainerSpec) -> LaunchPlan {
+    if docker.is_available() {
+        LaunchPlan {
+            mode: LaunchMode::Container,
+            command: "docker".to_string(),
+            args: build_run_args(spec),
+            // En contenedor el env se inyecta por `-e` (ya dentro de los args).
+            env: BTreeMap::new(),
+            working_directory: spec.worktree_host.clone(),
+        }
+    } else {
+        // Fallback nativo: corremos el comando real directo en el worktree, con
+        // el env (puertos, etc) via shell wrapper de `JobTerminal::spawn`.
+        let mut parts = spec.command.iter();
+        let command = parts
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "claude".to_string());
+        LaunchPlan {
+            mode: LaunchMode::Native,
+            command,
+            args: parts.cloned().collect(),
+            env: spec.env.iter().cloned().collect(),
+            working_directory: spec.worktree_host.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -321,5 +379,57 @@ mod tests {
         // La imagen viene justo despues de `-w <workdir>`.
         assert_eq!(a[img - 2], "-w");
         assert_eq!(a[img - 1], CONTAINER_WORKDIR);
+    }
+
+    #[test]
+    fn plan_uses_container_when_docker_available() {
+        let docker = DockerStatus::Available {
+            server_version: "27.3.1".into(),
+        };
+        let plan = plan_launch(&docker, &sample_spec());
+        assert_eq!(plan.mode, LaunchMode::Container);
+        assert_eq!(plan.command, "docker");
+        assert_eq!(plan.args, build_run_args(&sample_spec()));
+        assert!(
+            plan.env.is_empty(),
+            "en contenedor el env va por -e dentro de los args"
+        );
+        assert_eq!(plan.working_directory, PathBuf::from("/host/wt"));
+    }
+
+    #[test]
+    fn plan_falls_back_to_native_when_docker_unavailable() {
+        let docker = DockerStatus::Unavailable {
+            reason: UnavailableReason::BinaryNotFound,
+        };
+        let plan = plan_launch(&docker, &sample_spec());
+        assert_eq!(plan.mode, LaunchMode::Native);
+        assert_eq!(plan.command, "claude");
+        assert_eq!(plan.args, vec!["arregla el bug".to_string()]);
+        assert_eq!(plan.working_directory, PathBuf::from("/host/wt"));
+    }
+
+    #[test]
+    fn native_plan_injects_env_for_shell_wrapper() {
+        let docker = DockerStatus::Unavailable {
+            reason: UnavailableReason::DaemonNotResponding,
+        };
+        let plan = plan_launch(&docker, &sample_spec());
+        assert_eq!(
+            plan.env.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://x/session_abc")
+        );
+    }
+
+    #[test]
+    fn native_plan_defaults_command_to_claude_when_empty() {
+        let mut spec = sample_spec();
+        spec.command = vec![];
+        let docker = DockerStatus::Unavailable {
+            reason: UnavailableReason::BinaryNotFound,
+        };
+        let plan = plan_launch(&docker, &spec);
+        assert_eq!(plan.command, "claude");
+        assert!(plan.args.is_empty());
     }
 }
