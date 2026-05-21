@@ -14,16 +14,22 @@
 //! OS (`snapshot_all_processes`) es glue fina sobre `sysinfo`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
 
 /// Info minima de un proceso para construir el arbol y agregar recursos.
+/// Incluye `cwd` y `cmd` porque el detector de sesiones Claude externas
+/// (`claude_sessions`) los necesita para identificar el CLI real y agrupar
+/// por workspace. Para el arbol de recursos solo se usan pid/parent/memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcInfo {
     pub pid: u32,
     pub parent_pid: Option<u32>,
     pub name: String,
     pub memory_bytes: u64,
+    pub cwd: Option<PathBuf>,
+    pub cmd: Vec<String>,
 }
 
 /// Recursos agregados del arbol de procesos de una sesion.
@@ -88,7 +94,12 @@ pub fn aggregate(subtree: &[ProcInfo]) -> SessionResources {
 /// Refresca solo lo necesario (procesos + memoria) para ser barato.
 pub fn snapshot_all_processes() -> Vec<ProcInfo> {
     let sys = System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing().with_memory()),
+        RefreshKind::nothing().with_processes(
+            ProcessRefreshKind::nothing()
+                .with_memory()
+                .with_cwd(UpdateKind::Always)
+                .with_cmd(UpdateKind::Always),
+        ),
     );
     sys.processes()
         .iter()
@@ -97,6 +108,12 @@ pub fn snapshot_all_processes() -> Vec<ProcInfo> {
             parent_pid: proc.parent().map(|p| p.as_u32()),
             name: proc.name().to_string_lossy().to_string(),
             memory_bytes: proc.memory(),
+            cwd: proc.cwd().map(|p| p.to_path_buf()),
+            cmd: proc
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().to_string())
+                .collect(),
         })
         .collect()
 }
@@ -133,6 +150,8 @@ mod tests {
             parent_pid: parent,
             name: format!("p{pid}"),
             memory_bytes: mem,
+            cwd: None,
+            cmd: Vec::new(),
         }
     }
 

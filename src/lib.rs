@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod claude_config;
+pub mod claude_sessions;
 pub mod git;
 pub mod port_alloc;
 pub mod port_detector;

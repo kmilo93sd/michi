@@ -7,6 +7,7 @@ use egui_term::{PtyEvent, TerminalView};
 use tracing::{debug, warn};
 
 use crate::claude_config::{self, ClaudeInventory};
+use crate::claude_sessions;
 use crate::port_alloc;
 use crate::port_detector;
 use crate::resource_monitor;
@@ -63,6 +64,10 @@ pub struct App {
     resource_snapshots: HashMap<String, resource_monitor::SessionResources>,
     /// Ultima vez que se recomputaron los resource_snapshots.
     last_resource_poll: Option<Instant>,
+    /// Sesiones de Claude Code corriendo en el sistema FUERA de michi
+    /// (terminales sueltas, VS Code, etc), detectadas por escaneo de
+    /// procesos. Se refrescan en el mismo poll que los recursos.
+    detected_sessions: Vec<claude_sessions::DetectedSession>,
 }
 
 /// El usuario hizo click en ▶ de un workspace o repo. Mostrar dialogo
@@ -160,23 +165,27 @@ impl App {
             claude_globals: claude_config::read_globals(),
             resource_snapshots: HashMap::new(),
             last_resource_poll: None,
+            detected_sessions: Vec::new(),
         };
         app.push_status_targets();
         app
     }
 
-    /// Recomputa los recursos (RAM + procesos) de cada terminal activo, con
-    /// throttle. Hace UN snapshot del OS y deriva el subarbol de cada job —
-    /// barato aunque haya varias sesiones.
+    /// Recomputa recursos de cada terminal managed + detecta sesiones de
+    /// Claude externas, con throttle. Hace UN snapshot del OS y lo reusa para
+    /// ambos. Corre siempre (no solo con terminales) porque puede haber
+    /// sesiones externas aunque michi no tenga ninguna managed.
     fn maybe_poll_resources(&mut self, ctx: &egui::Context) {
         const RESOURCE_POLL_INTERVAL: Duration = Duration::from_secs(3);
         let due = self
             .last_resource_poll
             .is_none_or(|t| t.elapsed() >= RESOURCE_POLL_INTERVAL);
-        if !due || self.terminals.is_empty() {
+        if !due {
             return;
         }
         let all = resource_monitor::snapshot_all_processes();
+
+        // Recursos de cada terminal managed.
         self.resource_snapshots = self
             .terminals
             .iter()
@@ -185,8 +194,23 @@ impl App {
                 (job_id.clone(), resource_monitor::aggregate(&subtree))
             })
             .collect();
+
+        // Sesiones Claude externas, dedupeadas contra las managed: si el PID
+        // de una sesion detectada ya esta dentro del arbol de algun terminal
+        // managed, es la misma sesion (michi la lanzo) y no la duplicamos.
+        let managed_pids: std::collections::HashSet<u32> = self
+            .terminals
+            .values()
+            .flat_map(|t| resource_monitor::collect_subtree(&all, t.root_pid))
+            .map(|p| p.pid)
+            .collect();
+        self.detected_sessions = claude_sessions::detect_sessions(&all)
+            .into_iter()
+            .filter(|d| !managed_pids.contains(&d.pid))
+            .collect();
+
         self.last_resource_poll = Some(Instant::now());
-        // Repintar pronto para que el numero se actualice aunque no haya
+        // Repintar pronto para que los numeros se actualicen aunque no haya
         // otra interaccion.
         ctx.request_repaint_after(RESOURCE_POLL_INTERVAL);
     }
@@ -1005,6 +1029,7 @@ impl App {
         // Clone para evitar lifetime acrobatics: el loop necesita iterar workspaces
         // y simultaneamente leer self.collapsed_workspaces y jobs_for_workspace.
         let workspaces = self.workspaces.clone();
+        let detected_sessions = self.detected_sessions.clone();
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -1079,6 +1104,16 @@ impl App {
                                     job_menu_pick = Some((job.id.clone(), pick));
                                 }
                             }
+                        }
+
+                        // Sesiones Claude externas (no lanzadas por michi) cuyo
+                        // cwd cae bajo este workspace. Read-only: solo monitoreo.
+                        for sess in detected_sessions.iter().filter(|s| {
+                            s.cwd.as_deref().is_some_and(|cwd| {
+                                claude_sessions::cwd_belongs_to_workspace(cwd, &ws.path)
+                            })
+                        }) {
+                            render_detected_card(ui, sess, &ws.path, &self.theme);
                         }
                     }
                 }
@@ -1765,6 +1800,95 @@ fn render_job_card(
     JobCardOutcome {
         clicked: response.clicked(),
         menu_pick,
+    }
+}
+
+/// Renderiza una sesion Claude DETECTADA (externa a michi): read-only, solo
+/// monitoreo. Se distingue de las managed por un badge "externa" + estilo
+/// atenuado. Muestra el subpath del cwd relativo al workspace y los recursos.
+fn render_detected_card(
+    ui: &mut egui::Ui,
+    sess: &claude_sessions::DetectedSession,
+    workspace_path: &std::path::Path,
+    theme: &Theme,
+) {
+    let full_width = ui.available_width();
+    let has_resources = sess.resources.process_count > 0;
+    let extra_height = if has_resources { 14.0 } else { 0.0 };
+    let (rect, _response) = ui.allocate_exact_size(
+        egui::vec2(full_width, theme.card_row_height + extra_height),
+        egui::Sense::hover(),
+    );
+
+    paint_tree_line(ui, rect, theme, theme.tree_line_ws_x);
+
+    let inner = rect.shrink2(egui::vec2(22.0, 6.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::top_down(egui::Align::LEFT)),
+    );
+
+    // Subpath del cwd relativo al workspace (que carpeta dentro del ws), o
+    // el resume id si esta retomada, o el PID como fallback.
+    let label = sess
+        .cwd
+        .as_deref()
+        .and_then(|cwd| cwd.strip_prefix(workspace_path).ok())
+        .map(|rel| {
+            let r = rel.to_string_lossy().replace('\\', "/");
+            if r.is_empty() {
+                "(raiz del workspace)".to_string()
+            } else {
+                r
+            }
+        })
+        .unwrap_or_else(|| format!("pid {}", sess.pid));
+
+    // Linea 1: dot apagado (externa) + label + badge "externa" a la derecha.
+    child.horizontal(|ui| {
+        ui.colored_label(theme.text_muted, "\u{25CB}");
+        ui.label(egui::RichText::new(label).color(theme.text_muted));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new("externa")
+                    .small()
+                    .color(theme.text_muted),
+            )
+            .on_hover_text(
+                "Sesion de Claude Code corriendo fuera de michi (terminal, IDE, etc).\n\
+                     Solo monitoreo: michi no controla su terminal.",
+            );
+        });
+    });
+
+    // Linea 2: resume id (si la sesion fue retomada) o el PID.
+    let subtitle = match &sess.resume_id {
+        Some(id) => format!("resume {}", short_id(id)),
+        None => format!("pid {}", sess.pid),
+    };
+    child.label(egui::RichText::new(subtitle).small().weak());
+
+    // Linea 3 opcional: recursos.
+    if has_resources {
+        child.label(
+            egui::RichText::new(format!(
+                "{} procs \u{B7} {}",
+                sess.resources.process_count,
+                sess.resources.memory_human()
+            ))
+            .small()
+            .color(theme.text_muted),
+        );
+    }
+}
+
+/// Acorta un uuid largo para mostrar: "f570160f-..." en vez del id completo.
+fn short_id(id: &str) -> String {
+    match id.split_once('-') {
+        Some((head, _)) => format!("{head}\u{2026}"),
+        None if id.len() > 8 => format!("{}\u{2026}", &id[..8]),
+        None => id.to_string(),
     }
 }
 
