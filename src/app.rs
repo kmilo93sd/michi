@@ -303,6 +303,12 @@ impl App {
             let env = self.env_for_job(&job);
             let plan = self.build_launch_plan(&job, &env);
             debug!("job {job_id}: lanzando en modo {:?}", plan.mode);
+            // En modo contenedor el nombre es determinista (michi-<id>); si quedo
+            // uno colgado (cierre de claude, reinicio de michi), `docker run`
+            // chocaria por nombre. Lo borramos antes (best-effort).
+            if plan.mode == docker::LaunchMode::Container {
+                docker::remove_container(&docker::container_name(&job.id));
+            }
             match JobTerminal::spawn(
                 backend_id,
                 ctx.clone(),
@@ -387,15 +393,19 @@ impl App {
             .filter_map(|v| v.parse::<u16>().ok())
             .map(|p| (p, p))
             .collect();
-        let creds_host = dirs::home_dir()
-            .map(|h| h.join(".claude").join(".credentials.json"))
+        let claude_home_host = dirs::home_dir()
+            .map(|h| h.join(".claude"))
+            .filter(|p| p.is_dir());
+        let claude_json_host = dirs::home_dir()
+            .map(|h| h.join(".claude.json"))
             .filter(|p| p.is_file());
 
         let spec = docker::ContainerSpec {
-            name: format!("michi-{}", job.id),
+            name: docker::container_name(&job.id),
             image: docker::detect_base_image(&job.worktree_path),
             worktree_host: job.worktree_path.clone(),
-            creds_host,
+            claude_home_host,
+            claude_json_host,
             ports,
             env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             memory: Some("4g".to_string()),

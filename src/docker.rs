@@ -78,10 +78,15 @@ pub fn classify_version_output(success: bool, stdout: &str) -> DockerStatus {
 
 /// Directorio dentro del contenedor donde se monta el worktree de la sesion.
 pub const CONTAINER_WORKDIR: &str = "/work";
-/// Ruta dentro del contenedor donde se montan las credenciales de Claude
-/// (read-only). El resto de `/root/.claude` queda escribible para que claude
-/// guarde sesiones/cache adentro.
-pub const CONTAINER_CREDS_PATH: &str = "/root/.claude/.credentials.json";
+/// Ruta dentro del contenedor donde se monta el `~/.claude` del host (read-write).
+/// Se monta la carpeta ENTERA (no solo el token) porque el claude interactivo
+/// necesita su config + flag de onboarding + historial; si no, re-pide login.
+/// RW porque claude escribe sesiones/estado. Es tu config (no parte del sandbox).
+pub const CONTAINER_CLAUDE_HOME: &str = "/root/.claude";
+/// Ruta del `~/.claude.json` del host dentro del contenedor: es un archivo
+/// SEPARADO de la carpeta `.claude/` y guarda config + flag de onboarding +
+/// trust por proyecto. Sin montarlo, el claude interactivo re-onboarda/pide login.
+pub const CONTAINER_CLAUDE_JSON: &str = "/root/.claude.json";
 /// Ruta donde se monta el binario del agente (claude) dentro del contenedor.
 pub const CONTAINER_CLAUDE_PATH: &str = "/usr/local/bin/claude";
 
@@ -94,8 +99,12 @@ pub struct ContainerSpec {
     pub image: String,
     /// Worktree del host a montar en `CONTAINER_WORKDIR`.
     pub worktree_host: PathBuf,
-    /// Archivo de credenciales de Claude a montar read-only (token OAuth).
-    pub creds_host: Option<PathBuf>,
+    /// Carpeta `~/.claude` del host a montar read-write en `CONTAINER_CLAUDE_HOME`
+    /// (auth + config + historial). `None` = la imagen ya tiene config (raro).
+    pub claude_home_host: Option<PathBuf>,
+    /// Archivo `~/.claude.json` del host a montar read-write en
+    /// `CONTAINER_CLAUDE_JSON` (config + onboarding + trust). `None` = omitir.
+    pub claude_json_host: Option<PathBuf>,
     /// Puertos a publicar: `(host, contenedor)`.
     pub ports: Vec<(u16, u16)>,
     /// Variables de entorno a inyectar (ej `DATABASE_URL`, `PORT_*`).
@@ -134,10 +143,24 @@ pub fn build_run_args(spec: &ContainerSpec) -> Vec<String> {
         CONTAINER_WORKDIR
     ));
 
-    // Credenciales de Claude, read-only (solo el archivo del token).
-    if let Some(creds) = &spec.creds_host {
+    // ~/.claude del host montado read-write (auth + config + historial).
+    if let Some(claude_home) = &spec.claude_home_host {
         args.push("-v".to_string());
-        args.push(format!("{}:{}:ro", creds.display(), CONTAINER_CREDS_PATH));
+        args.push(format!(
+            "{}:{}",
+            claude_home.display(),
+            CONTAINER_CLAUDE_HOME
+        ));
+    }
+
+    // ~/.claude.json del host (config + onboarding + trust), read-write.
+    if let Some(claude_json) = &spec.claude_json_host {
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{}",
+            claude_json.display(),
+            CONTAINER_CLAUDE_JSON
+        ));
     }
 
     // Binario del agente (claude) inyectado read-only, sin rebuild de imagen.
@@ -175,6 +198,20 @@ pub fn build_run_args(spec: &ContainerSpec) -> Vec<String> {
     args.extend(spec.command.iter().cloned());
 
     args
+}
+
+/// Nombre determinista del contenedor de un job (`michi-<job_id>`). Determinista
+/// para poder limpiarlo/reusarlo; al relanzar se borra el viejo con ese nombre.
+pub fn container_name(job_id: &str) -> String {
+    format!("michi-{job_id}")
+}
+
+/// Borra (forzado) el contenedor con ese nombre si existe. Best-effort: si no
+/// existe, `docker rm -f` falla y lo ignoramos. Se llama ANTES de `docker run`
+/// para evitar el conflicto de nombre cuando quedo uno colgado (cierre de claude,
+/// reinicio de michi, crash).
+pub fn remove_container(name: &str) {
+    let _ = Command::new("docker").args(["rm", "-f", name]).output();
 }
 
 /// Como termino lanzandose una sesion.
@@ -403,7 +440,8 @@ mod tests {
             name: "michi-abc".to_string(),
             image: "michi-base".to_string(),
             worktree_host: PathBuf::from("/host/wt"),
-            creds_host: Some(PathBuf::from("/host/.creds.json")),
+            claude_home_host: Some(PathBuf::from("/host/.claude")),
+            claude_json_host: Some(PathBuf::from("/host/.claude.json")),
             ports: vec![(4100, 8080)],
             env: vec![(
                 "DATABASE_URL".to_string(),
@@ -445,22 +483,50 @@ mod tests {
     }
 
     #[test]
-    fn run_args_mount_creds_read_only() {
+    fn run_args_mount_claude_home_read_write() {
+        let a = build_run_args(&sample_spec());
+        // Carpeta entera ~/.claude, RW (sin sufijo :ro) para que el claude
+        // interactivo tenga auth + config + historial.
+        let expected = format!(
+            "{}:{}",
+            PathBuf::from("/host/.claude").display(),
+            CONTAINER_CLAUDE_HOME
+        );
+        assert!(a.contains(&expected), "args: {a:?}");
+        assert!(
+            !a.iter().any(|x| x.contains(":/root/.claude:ro")),
+            "no debe ser read-only"
+        );
+    }
+
+    #[test]
+    fn run_args_omit_claude_home_when_none() {
+        let mut spec = sample_spec();
+        spec.claude_home_host = None;
+        let a = build_run_args(&spec);
+        // Sin el dir, no debe quedar el mount de la carpeta (el del .json sigue,
+        // por eso comparamos el target exacto del dir).
+        let dir_mount = format!(":{CONTAINER_CLAUDE_HOME}");
+        assert!(!a.iter().any(|x| x.ends_with(&dir_mount)));
+    }
+
+    #[test]
+    fn run_args_mount_claude_json_read_write() {
         let a = build_run_args(&sample_spec());
         let expected = format!(
-            "{}:{}:ro",
-            PathBuf::from("/host/.creds.json").display(),
-            CONTAINER_CREDS_PATH
+            "{}:{}",
+            PathBuf::from("/host/.claude.json").display(),
+            CONTAINER_CLAUDE_JSON
         );
         assert!(a.contains(&expected), "args: {a:?}");
     }
 
     #[test]
-    fn run_args_omit_creds_when_none() {
+    fn run_args_omit_claude_json_when_none() {
         let mut spec = sample_spec();
-        spec.creds_host = None;
+        spec.claude_json_host = None;
         let a = build_run_args(&spec);
-        assert!(!a.iter().any(|x| x.contains(CONTAINER_CREDS_PATH)));
+        assert!(!a.iter().any(|x| x.contains(CONTAINER_CLAUDE_JSON)));
     }
 
     #[test]
@@ -680,6 +746,11 @@ mod tests {
             build_session_command(Some("arregla el CORS")),
             vec!["claude".to_string(), "arregla el CORS".to_string()]
         );
+    }
+
+    #[test]
+    fn container_name_is_prefixed() {
+        assert_eq!(container_name("job-1"), "michi-job-1");
     }
 
     #[test]
