@@ -1845,10 +1845,11 @@ fn render_detected_card(
         })
         .unwrap_or_else(|| format!("pid {}", sess.pid));
 
-    // Linea 1: dot apagado (externa) + label + badge "externa" a la derecha.
+    // Linea 1: dot con el estado REAL de Claude + label + badge "externa".
+    let (dot, dot_color) = claude_status_visual(sess.status, theme);
     child.horizontal(|ui| {
-        ui.colored_label(theme.text_muted, "\u{25CB}");
-        ui.label(egui::RichText::new(label).color(theme.text_muted));
+        ui.colored_label(dot_color, dot.to_string());
+        ui.label(egui::RichText::new(label).color(theme.text_primary));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new("externa")
@@ -1862,10 +1863,10 @@ fn render_detected_card(
         });
     });
 
-    // Linea 2: resume id (si la sesion fue retomada) o el PID.
+    // Linea 2: estado legible + resume id (si la sesion fue retomada).
     let subtitle = match &sess.resume_id {
-        Some(id) => format!("resume {}", short_id(id)),
-        None => format!("pid {}", sess.pid),
+        Some(id) => format!("{} \u{B7} resume {}", sess.status.label(), short_id(id)),
+        None => sess.status.label().to_string(),
     };
     child.label(egui::RichText::new(subtitle).small().weak());
 
@@ -1889,6 +1890,22 @@ fn short_id(id: &str) -> String {
         Some((head, _)) => format!("{head}\u{2026}"),
         None if id.len() > 8 => format!("{}\u{2026}", &id[..8]),
         None => id.to_string(),
+    }
+}
+
+/// Mapea el estado real de Claude a (dot char, color) para la card. Usa el
+/// mismo lenguaje visual que los JobStatus de las sesiones managed.
+fn claude_status_visual(
+    status: claude_sessions::ClaudeStatus,
+    theme: &Theme,
+) -> (char, egui::Color32) {
+    use claude_sessions::ClaudeStatus as S;
+    match status {
+        S::Busy => ('\u{25D0}', theme.status_thinking),
+        S::Shell => ('\u{25D0}', theme.status_thinking),
+        S::Idle => ('\u{25CF}', theme.status_idle),
+        S::Waiting => ('\u{25B2}', theme.status_needs_attention),
+        S::Unknown => ('\u{25CB}', theme.text_muted),
     }
 }
 
