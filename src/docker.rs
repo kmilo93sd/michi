@@ -200,6 +200,20 @@ pub fn build_run_args(spec: &ContainerSpec) -> Vec<String> {
     args
 }
 
+/// Nombre determinista del contenedor de un job (`michi-<job_id>`). Determinista
+/// para poder limpiarlo/reusarlo; al relanzar se borra el viejo con ese nombre.
+pub fn container_name(job_id: &str) -> String {
+    format!("michi-{job_id}")
+}
+
+/// Borra (forzado) el contenedor con ese nombre si existe. Best-effort: si no
+/// existe, `docker rm -f` falla y lo ignoramos. Se llama ANTES de `docker run`
+/// para evitar el conflicto de nombre cuando quedo uno colgado (cierre de claude,
+/// reinicio de michi, crash).
+pub fn remove_container(name: &str) {
+    let _ = Command::new("docker").args(["rm", "-f", name]).output();
+}
+
 /// Como termino lanzandose una sesion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
@@ -732,6 +746,11 @@ mod tests {
             build_session_command(Some("arregla el CORS")),
             vec!["claude".to_string(), "arregla el CORS".to_string()]
         );
+    }
+
+    #[test]
+    fn container_name_is_prefixed() {
+        assert_eq!(container_name("job-1"), "michi-job-1");
     }
 
     #[test]
