@@ -45,6 +45,8 @@ pub struct App {
     status_targets_tx: Sender<Vec<StatusPollTarget>>,
     dirty_since: Option<Instant>,
     close_confirm: Option<CloseConfirm>,
+    /// Confirmacion pendiente para matar una sesion detectada (externa).
+    detected_close_confirm: Option<DetectedCloseConfirm>,
     /// Pendiente de eleccion: el usuario hizo click en ▶ de un repo y debe
     /// decidir si abrir sesion directa o worktree nuevo.
     start_choice: Option<StartChoice>,
@@ -115,6 +117,14 @@ enum CloseConfirmAction {
     Cancel,
 }
 
+/// Confirmacion para cerrar (matar) una sesion DETECTADA externa: mata el
+/// proceso claude + su arbol. Destructivo, por eso pide confirmacion.
+struct DetectedCloseConfirm {
+    pid: u32,
+    label: String,
+    tree_pids: Vec<u32>,
+}
+
 enum StartChoiceAction {
     Direct,
     Worktree,
@@ -147,6 +157,13 @@ enum JobMenu {
     Close,
 }
 
+/// Acciones del menu contextual de una sesion DETECTADA (externa a michi).
+#[derive(Clone, Copy)]
+enum DetectedMenu {
+    OpenFolder,
+    Close,
+}
+
 impl App {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         let theme = Theme::load_or_create_default();
@@ -172,6 +189,7 @@ impl App {
             status_targets_tx,
             dirty_since: None,
             close_confirm: None,
+            detected_close_confirm: None,
             start_choice: None,
             terminals: HashMap::new(),
             pty_tx,
@@ -419,7 +437,7 @@ impl App {
                 ui.set_min_width(460.0);
                 ui.set_max_width(580.0);
 
-                ui.heading("Iniciar trabajo");
+                ui.heading("Iniciar sesion");
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(scope_label).color(theme.text_muted));
                 ui.add_space(16.0);
@@ -659,7 +677,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_min_width(380.0);
                 ui.set_max_width(520.0);
-                ui.heading("Cerrar trabajo");
+                ui.heading("Cerrar sesion");
                 ui.add_space(12.0);
                 ui.label(format!(
                     "Tienes {} archivos modificados sin commitear en esta rama.",
@@ -710,6 +728,118 @@ impl App {
             }
             Some(CloseConfirmAction::Cancel) => {
                 self.close_confirm = None;
+            }
+            None => {}
+        }
+    }
+
+    /// Procesa una accion del menu contextual de una sesion detectada.
+    fn handle_detected_menu(&mut self, pid: u32, action: DetectedMenu) {
+        let Some(sess) = self.detected_sessions.iter().find(|s| s.pid == pid) else {
+            return;
+        };
+        match action {
+            DetectedMenu::OpenFolder => {
+                let Some(cwd) = sess.cwd.clone() else {
+                    self.last_error = Some("la sesion no expone su carpeta".into());
+                    return;
+                };
+                if let Err(e) = system::open_folder(&cwd) {
+                    self.last_error = Some(format!("no se pudo abrir la carpeta: {e:#}"));
+                }
+            }
+            DetectedMenu::Close => {
+                let label = sess
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| format!("pid {}", sess.pid));
+                let tree_pids = sess.processes.iter().map(|p| p.pid).collect();
+                self.detected_close_confirm = Some(DetectedCloseConfirm {
+                    pid,
+                    label,
+                    tree_pids,
+                });
+            }
+        }
+    }
+
+    /// Modal de confirmacion para matar una sesion detectada (destructivo).
+    fn render_detected_close_confirm(&mut self, ctx: &egui::Context) {
+        let Some(confirm) = self.detected_close_confirm.as_ref() else {
+            return;
+        };
+        let theme = &self.theme;
+        let frame = egui::Frame::new()
+            .fill(theme.bg_surface)
+            .inner_margin(egui::Margin::same(20))
+            .corner_radius(egui::CornerRadius::same(8))
+            .stroke(egui::Stroke::new(1.0, theme.border));
+
+        let proc_count = confirm.tree_pids.len();
+        let label = confirm.label.clone();
+        let mut action: Option<CloseConfirmAction> = None;
+        let modal_response = egui::Modal::new(egui::Id::new("detected_close_confirm_modal"))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_min_width(380.0);
+                ui.set_max_width(520.0);
+                ui.heading("Cerrar sesion");
+                ui.add_space(12.0);
+                ui.label(format!(
+                    "Vas a matar la sesion \"{label}\" y su arbol de procesos."
+                ));
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Se terminan {proc_count} procesos (claude + hijos: dev servers, \
+                         docker, etc). El trabajo en curso de esa sesion se pierde.",
+                    ))
+                    .small()
+                    .color(theme.status_error),
+                );
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("Matar sesion")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            action = Some(CloseConfirmAction::Force);
+                        }
+                        ui.add_space(8.0);
+                        if ui
+                            .button("Cancelar")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            action = Some(CloseConfirmAction::Cancel);
+                        }
+                    });
+                });
+            });
+
+        if modal_response.backdrop_response.clicked() {
+            action = Some(CloseConfirmAction::Cancel);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            action = Some(CloseConfirmAction::Cancel);
+        }
+
+        match action {
+            Some(CloseConfirmAction::Force) => {
+                let c = self.detected_close_confirm.take().expect("checked above");
+                if let Err(e) = system::kill_session(c.pid, &c.tree_pids) {
+                    self.last_error = Some(format!("no se pudo cerrar la sesion: {e:#}"));
+                } else {
+                    self.last_info = Some(format!("Sesion \"{}\" cerrada.", c.label));
+                    if self.selected_detected_pid == Some(c.pid) {
+                        self.selected_detected_pid = None;
+                    }
+                }
+            }
+            Some(CloseConfirmAction::Cancel) => {
+                self.detected_close_confirm = None;
             }
             None => {}
         }
@@ -940,7 +1070,7 @@ impl eframe::App for App {
                     } else {
                         ui.small(
                             "Ctrl+N nuevo \u{B7} Ctrl+Tab siguiente \u{B7} \
-                             Ctrl+Shift+Tab anterior \u{B7} Ctrl+W cerrar trabajo",
+                             Ctrl+Shift+Tab anterior \u{B7} Ctrl+W cerrar sesion",
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -986,7 +1116,7 @@ impl eframe::App for App {
                     if ui
                         .add_sized(
                             [ui.available_width(), 32.0],
-                            egui::Button::new("+ Nuevo trabajo"),
+                            egui::Button::new("+ Nueva sesion"),
                         )
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
@@ -999,7 +1129,7 @@ impl eframe::App for App {
                 if !self.jobs.is_empty() {
                     ui.small(
                         egui::RichText::new(format!(
-                            "{} trabajos \u{B7} {} pensando",
+                            "{} sesiones \u{B7} {} pensando",
                             self.jobs.len(),
                             self.count_thinking()
                         ))
@@ -1039,7 +1169,7 @@ impl eframe::App for App {
                     close_clicked = self.render_selected_job(ui, &id);
                 } else {
                     ui.centered_and_justified(|ui| {
-                        ui.label("Selecciona un trabajo de la barra lateral");
+                        ui.label("Selecciona una sesion de la barra lateral");
                     });
                 }
             });
@@ -1053,6 +1183,7 @@ impl eframe::App for App {
         }
 
         self.render_close_confirm(ui.ctx());
+        self.render_detected_close_confirm(ui.ctx());
         self.render_start_choice(ui.ctx());
 
         if self.new_job_modal_open {
@@ -1123,6 +1254,7 @@ impl App {
         let mut job_menu_pick: Option<(String, JobMenu)> = None;
         let mut prep_action_for: Option<(String, PrepBannerAction)> = None;
         let mut detected_clicked: Option<u32> = None;
+        let mut detected_menu_pick: Option<(u32, DetectedMenu)> = None;
 
         // Clone para evitar lifetime acrobatics: el loop necesita iterar workspaces
         // y simultaneamente leer self.collapsed_workspaces y jobs_for_workspace.
@@ -1177,7 +1309,7 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.add_space(self.theme.tree_line_ws_x + 8.0);
                                 ui.small(
-                                    egui::RichText::new("Sin trabajos activos")
+                                    egui::RichText::new("Sin sesiones activas")
                                         .color(self.theme.text_muted),
                                 );
                             });
@@ -1213,8 +1345,13 @@ impl App {
                             })
                         }) {
                             let selected = self.selected_detected_pid == Some(sess.pid);
-                            if render_detected_card(ui, sess, &ws.path, selected, &self.theme) {
+                            let outcome =
+                                render_detected_card(ui, sess, &ws.path, selected, &self.theme);
+                            if outcome.clicked {
                                 detected_clicked = Some(sess.pid);
+                            }
+                            if let Some(pick) = outcome.menu_pick {
+                                detected_menu_pick = Some((sess.pid, pick));
                             }
                         }
                     }
@@ -1277,6 +1414,9 @@ impl App {
             // Seleccionar una detectada limpia la seleccion de job managed
             // (el panel central muestra una u otra, no ambas).
             self.selected_job_id = None;
+        }
+        if let Some((pid, action)) = detected_menu_pick {
+            self.handle_detected_menu(pid, action);
         }
         if let Some(id) = toggle_ws {
             if !self.collapsed_workspaces.remove(&id) {
@@ -1570,7 +1710,7 @@ fn workspace_header(
         egui::Id::new(("ws_plus_hover", &ws.id)),
         egui::Sense::hover(),
     )
-    .on_hover_text("Iniciar trabajo en este workspace");
+    .on_hover_text("Iniciar sesion en este workspace");
     if let Some(dr) = dot_rect {
         ui.interact(
             dr,
@@ -1623,7 +1763,7 @@ fn workspace_header(
             menu_pick = Some(WorkspaceMenu::DirectSession);
             ui.close_kind(egui::UiKind::Menu);
         }
-        if ui.button("Nuevo trabajo (worktree)").clicked() {
+        if ui.button("Nueva sesion (worktree)").clicked() {
             menu_pick = Some(WorkspaceMenu::NewWorktree);
             ui.close_kind(egui::UiKind::Menu);
         }
@@ -1820,7 +1960,7 @@ fn render_job_card(
 
     let mut menu_pick: Option<JobMenu> = None;
     response.context_menu(|ui| {
-        if ui.button("Ir al trabajo").clicked() {
+        if ui.button("Ir a la sesion").clicked() {
             menu_pick = Some(JobMenu::Select);
             ui.close_kind(egui::UiKind::Menu);
         }
@@ -1830,7 +1970,7 @@ fn render_job_card(
             ui.close_kind(egui::UiKind::Menu);
         }
         ui.separator();
-        if ui.button("Cerrar trabajo").clicked() {
+        if ui.button("Cerrar sesion").clicked() {
             menu_pick = Some(JobMenu::Close);
             ui.close_kind(egui::UiKind::Menu);
         }
@@ -1913,16 +2053,22 @@ fn render_job_card(
     }
 }
 
+/// Resultado de renderizar una card de sesion detectada.
+struct DetectedCardOutcome {
+    clicked: bool,
+    menu_pick: Option<DetectedMenu>,
+}
+
 /// Renderiza una sesion Claude DETECTADA (externa a michi). Clickeable para
-/// abrir su panel de detalle. Devuelve `true` si se clickeo. Se distingue de
-/// las managed por un badge "externa".
+/// abrir su panel de detalle, con menu contextual (click derecho) para abrir
+/// carpeta o cerrar la sesion. Se distingue de las managed por un badge "externa".
 fn render_detected_card(
     ui: &mut egui::Ui,
     sess: &claude_sessions::DetectedSession,
     workspace_path: &std::path::Path,
     selected: bool,
     theme: &Theme,
-) -> bool {
+) -> DetectedCardOutcome {
     let full_width = ui.available_width();
     let has_resources = sess.resources.process_count > 0;
     let has_chips = !sess.breakdown.is_empty();
@@ -1937,6 +2083,22 @@ fn render_detected_card(
         egui::vec2(full_width, theme.card_row_height + extra_height),
         egui::Sense::click(),
     );
+
+    let mut menu_pick: Option<DetectedMenu> = None;
+    response.context_menu(|ui| {
+        if ui.button("Abrir carpeta").clicked() {
+            menu_pick = Some(DetectedMenu::OpenFolder);
+            ui.close_kind(egui::UiKind::Menu);
+        }
+        ui.separator();
+        if ui
+            .button(egui::RichText::new("Cerrar sesion").color(theme.status_error))
+            .clicked()
+        {
+            menu_pick = Some(DetectedMenu::Close);
+            ui.close_kind(egui::UiKind::Menu);
+        }
+    });
 
     let bg = if selected {
         theme.bg_card_selected
@@ -2037,9 +2199,10 @@ fn render_detected_card(
         });
     }
 
-    response
+    let clicked = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
+        .clicked();
+    DetectedCardOutcome { clicked, menu_pick }
 }
 
 /// Panel central de detalle de una sesion DETECTADA: header con titulo +
@@ -2200,18 +2363,18 @@ fn render_empty_state(ui: &mut egui::Ui, has_workspaces: bool) -> EmptyStateActi
     ui.vertical_centered(|ui| {
         ui.add_space(96.0);
         if has_workspaces {
-            ui.heading("Sin trabajos todavia");
+            ui.heading("Sin sesiones todavia");
             ui.add_space(12.0);
             ui.label(
                 egui::RichText::new(
-                    "Cada trabajo es un Claude Code corriendo en su propio worktree de git.\n\
-                     Crea uno para empezar a paralelizar tu trabajo sin pisarte entre repos.",
+                    "Cada sesion es un Claude Code aislado (en su contenedor o worktree).\n\
+                     Crea una para empezar a paralelizar sin pisarte entre repos.",
                 )
                 .weak(),
             );
             ui.add_space(24.0);
             if ui
-                .add_sized([220.0, 36.0], egui::Button::new("+ Crear primer trabajo"))
+                .add_sized([220.0, 36.0], egui::Button::new("+ Crear primera sesion"))
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
@@ -2278,7 +2441,7 @@ fn render_job_header(ui: &mut egui::Ui, job: &Job, theme: &Theme) -> JobPaneOutc
                     if ui
                         .button("X")
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Cerrar trabajo")
+                        .on_hover_text("Cerrar sesion")
                         .clicked()
                     {
                         outcome.close_clicked = true;

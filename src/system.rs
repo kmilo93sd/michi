@@ -25,6 +25,39 @@ pub fn open_folder(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Construye el comando para matar un proceso por PID. En Windows usa
+/// `taskkill /F /T` (mata el arbol de hijos); en unix `kill -9` (un PID).
+/// Pure: testeable sin matar nada.
+fn kill_command(pid: u32) -> (&'static str, Vec<String>) {
+    if cfg!(windows) {
+        (
+            "taskkill",
+            vec!["/F".into(), "/T".into(), "/PID".into(), pid.to_string()],
+        )
+    } else {
+        ("kill", vec!["-9".into(), pid.to_string()])
+    }
+}
+
+/// Mata una sesion y su arbol de procesos. En Windows `taskkill /F /T` sobre el
+/// PID raiz baja todo el arbol de una; en unix mata cada PID del arbol (sin
+/// pgid no hay kill recursivo simple). Best-effort: ignora procesos ya muertos.
+pub fn kill_session(root_pid: u32, tree_pids: &[u32]) -> Result<()> {
+    if cfg!(windows) {
+        let (cmd, args) = kill_command(root_pid);
+        Command::new(cmd)
+            .args(&args)
+            .status()
+            .with_context(|| format!("matando sesion pid {root_pid}"))?;
+    } else {
+        for &pid in tree_pids {
+            let (cmd, args) = kill_command(pid);
+            let _ = Command::new(cmd).args(&args).status();
+        }
+    }
+    Ok(())
+}
+
 /// Devuelve el binario del file manager segun el OS.
 fn file_manager_command() -> &'static str {
     if cfg!(windows) {
@@ -67,5 +100,27 @@ mod tests {
     fn open_folder_returns_err_for_nonexistent_path() {
         let err = open_folder(Path::new("/this/path/never/exists/abc")).unwrap_err();
         assert!(err.to_string().contains("no existe"));
+    }
+
+    #[test]
+    fn kill_command_includes_the_pid() {
+        let (_, args) = kill_command(4321);
+        assert!(args.iter().any(|a| a == "4321"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kill_command_on_windows_uses_taskkill_tree() {
+        let (cmd, args) = kill_command(1234);
+        assert_eq!(cmd, "taskkill");
+        assert_eq!(args, vec!["/F", "/T", "/PID", "1234"]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn kill_command_on_unix_uses_kill_minus9() {
+        let (cmd, args) = kill_command(1234);
+        assert_eq!(cmd, "kill");
+        assert_eq!(args, vec!["-9", "1234"]);
     }
 }

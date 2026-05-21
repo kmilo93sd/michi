@@ -127,7 +127,7 @@ pub fn show(
 
 fn render_header(ui: &mut egui::Ui, action: &mut ModalAction, creating: bool) {
     ui.horizontal(|ui| {
-        ui.heading("Nuevo trabajo");
+        ui.heading("Nueva sesion");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let close_btn = ui
                 .add_enabled(!creating, egui::Button::new("X").small())
