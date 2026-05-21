@@ -68,6 +68,9 @@ pub struct App {
     /// (terminales sueltas, VS Code, etc), detectadas por escaneo de
     /// procesos. Se refrescan en el mismo poll que los recursos.
     detected_sessions: Vec<claude_sessions::DetectedSession>,
+    /// Cache de titulos de sesion por session_id (primer mensaje del .jsonl).
+    /// Se lee una vez por sesion: el primer mensaje no cambia.
+    session_titles: HashMap<String, String>,
 }
 
 /// El usuario hizo click en ▶ de un workspace o repo. Mostrar dialogo
@@ -166,6 +169,7 @@ impl App {
             resource_snapshots: HashMap::new(),
             last_resource_poll: None,
             detected_sessions: Vec::new(),
+            session_titles: HashMap::new(),
         };
         app.push_status_targets();
         app
@@ -204,10 +208,23 @@ impl App {
             .flat_map(|t| resource_monitor::collect_subtree(&all, t.root_pid))
             .map(|p| p.pid)
             .collect();
-        self.detected_sessions = claude_sessions::detect_sessions(&all)
+        let mut detected: Vec<_> = claude_sessions::detect_sessions(&all)
             .into_iter()
             .filter(|d| !managed_pids.contains(&d.pid))
             .collect();
+        // Enriquecer con el titulo legible (primer mensaje). Cacheado por
+        // session_id: el primer mensaje no cambia, asi que se lee una sola vez.
+        for d in &mut detected {
+            if let (Some(sid), Some(cwd)) = (&d.session_id, &d.cwd) {
+                let title = self.session_titles.entry(sid.clone()).or_insert_with(|| {
+                    claude_sessions::read_session_title(sid, cwd).unwrap_or_default()
+                });
+                if !title.is_empty() {
+                    d.title = Some(title.clone());
+                }
+            }
+        }
+        self.detected_sessions = detected;
 
         self.last_resource_poll = Some(Instant::now());
         // Repintar pronto para que los numeros se actualicen aunque no haya
@@ -1836,21 +1853,22 @@ fn render_detected_card(
             .layout(egui::Layout::top_down(egui::Align::LEFT)),
     );
 
-    // Subpath del cwd relativo al workspace (que carpeta dentro del ws), o
-    // el resume id si esta retomada, o el PID como fallback.
-    let label = sess
-        .cwd
-        .as_deref()
-        .and_then(|cwd| cwd.strip_prefix(workspace_path).ok())
-        .map(|rel| {
-            let r = rel.to_string_lossy().replace('\\', "/");
-            if r.is_empty() {
-                "(raiz del workspace)".to_string()
-            } else {
-                r
-            }
-        })
-        .unwrap_or_else(|| format!("pid {}", sess.pid));
+    // Titulo: el primer mensaje del usuario (legible) si lo tenemos. Si no,
+    // caemos al subpath del cwd relativo al workspace, y por ultimo el PID.
+    let label = sess.title.clone().unwrap_or_else(|| {
+        sess.cwd
+            .as_deref()
+            .and_then(|cwd| cwd.strip_prefix(workspace_path).ok())
+            .map(|rel| {
+                let r = rel.to_string_lossy().replace('\\', "/");
+                if r.is_empty() {
+                    "(raiz del workspace)".to_string()
+                } else {
+                    r
+                }
+            })
+            .unwrap_or_else(|| format!("pid {}", sess.pid))
+    });
 
     // Linea 1: dot con el estado REAL de Claude + label + badge "externa".
     let (dot, dot_color) = claude_status_visual(sess.status, theme);

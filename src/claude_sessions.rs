@@ -106,6 +106,9 @@ pub struct DetectedSession {
     pub cwd: Option<PathBuf>,
     /// Session id de Claude si la sesion fue retomada con `--resume <id>`.
     pub resume_id: Option<String>,
+    /// Session id real de la sesion (del sessions file). Sirve para ubicar
+    /// el `.jsonl` de la conversacion y derivar el titulo.
+    pub session_id: Option<String>,
     /// Recursos agregados del arbol de procesos de la sesion.
     pub resources: SessionResources,
     /// Desglose de procesos notables del arbol (shells, runtimes, docker).
@@ -113,6 +116,9 @@ pub struct DetectedSession {
     /// Estado real reportado por Claude (`~/.claude/sessions/<pid>.json`).
     /// `Unknown` si no se pudo leer el sessions file.
     pub status: ClaudeStatus,
+    /// Titulo legible (primer mensaje del usuario). Lo puebla el App desde
+    /// su cache; `detect_sessions` lo deja en None.
+    pub title: Option<String>,
 }
 
 /// `true` si el proceso es el CLI de Claude Code (no la app de escritorio
@@ -153,16 +159,21 @@ pub fn detect_sessions(all: &[ProcInfo]) -> Vec<DetectedSession> {
         .filter(|p| is_claude_cli(&p.name, &p.cmd))
         .map(|p| {
             let subtree = resource_monitor::collect_subtree(all, p.pid);
-            let status = read_session_meta(p.pid)
+            let meta = read_session_meta(p.pid);
+            let status = meta
+                .as_ref()
                 .map(|m| m.status)
                 .unwrap_or(ClaudeStatus::Unknown);
+            let session_id = meta.map(|m| m.session_id);
             DetectedSession {
                 pid: p.pid,
                 cwd: p.cwd.clone(),
                 resume_id: extract_resume_id(&p.cmd),
+                session_id,
                 resources: resource_monitor::aggregate(&subtree),
                 breakdown: resource_monitor::classify_processes(&subtree),
                 status,
+                title: None,
             }
         })
         .collect();
@@ -177,6 +188,89 @@ pub fn detect_sessions(all: &[ProcInfo]) -> Vec<DetectedSession> {
 /// `workspace_path`. Se usa para agrupar las sesiones por workspace.
 pub fn cwd_belongs_to_workspace(cwd: &std::path::Path, workspace_path: &std::path::Path) -> bool {
     cwd.starts_with(workspace_path)
+}
+
+/// Codifica un cwd al formato de carpeta que usa Claude Code en
+/// `~/.claude/projects/<encoded>/`: cada `\`, `/` y `:` se reemplaza por `-`.
+/// Se quitan separadores finales antes de codificar.
+pub fn encode_project_dir(cwd: &std::path::Path) -> String {
+    let raw = cwd.to_string_lossy();
+    let trimmed = raw.trim_end_matches(['\\', '/']);
+    trimmed
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' => '-',
+            other => other,
+        })
+        .collect()
+}
+
+/// Extrae el texto del primer mensaje del usuario de UNA linea de un
+/// session `.jsonl`. Devuelve None si la linea no es un mensaje user o no
+/// tiene texto. Funcion pura, testeable.
+pub fn extract_user_text_from_line(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "user" {
+        return None;
+    }
+    let content = v.get("message")?.get("content")?;
+    // content puede ser string directo o array de bloques {type,text}.
+    if let Some(s) = content.as_str() {
+        return non_empty_trimmed(s);
+    }
+    let arr = content.as_array()?;
+    for block in arr {
+        if block.get("type").and_then(|t| t.as_str()) == Some("text")
+            && let Some(text) = block.get("text").and_then(|t| t.as_str())
+            && let Some(t) = non_empty_trimmed(text)
+        {
+            return Some(t);
+        }
+    }
+    None
+}
+
+fn non_empty_trimmed(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+/// Trunca un titulo a `max` chars (con elipsis), colapsando saltos de linea
+/// a espacios para que quepa en una linea de la card.
+pub fn truncate_title(text: &str, max: usize) -> String {
+    let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max {
+        one_line
+    } else {
+        let head: String = one_line.chars().take(max).collect();
+        format!("{}\u{2026}", head.trim_end())
+    }
+}
+
+/// Lee el titulo de una sesion: el primer mensaje del usuario en el
+/// `.jsonl`. Busca el archivo en `~/.claude/projects/<encoded-cwd>/<id>.jsonl`.
+/// Lee solo las primeras lineas (el primer mensaje esta al inicio). Glue FS.
+pub fn read_session_title(session_id: &str, cwd: &std::path::Path) -> Option<String> {
+    use std::io::BufRead;
+    let home = dirs::home_dir()?;
+    let path = home
+        .join(".claude")
+        .join("projects")
+        .join(encode_project_dir(cwd))
+        .join(format!("{session_id}.jsonl"));
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines().take(60) {
+        let line = line.ok()?;
+        if let Some(text) = extract_user_text_from_line(&line) {
+            return Some(truncate_title(&text, 48));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -431,6 +525,81 @@ mod tests {
             Some(PathBuf::from("C:\\proj\\venpu-workspace"))
         );
         assert_eq!(found[0].resume_id, Some("xyz".to_string()));
+    }
+
+    #[test]
+    fn encode_project_dir_windows_path() {
+        let p = std::path::Path::new("C:\\Users\\kmilo\\Documents\\projects\\venpu-workspace");
+        assert_eq!(
+            encode_project_dir(p),
+            "C--Users-kmilo-Documents-projects-venpu-workspace"
+        );
+    }
+
+    #[test]
+    fn encode_project_dir_strips_trailing_separator() {
+        let p = std::path::Path::new("C:\\Users\\kmilo\\venpu-workspace\\");
+        assert_eq!(encode_project_dir(p), "C--Users-kmilo-venpu-workspace");
+    }
+
+    #[test]
+    fn extract_user_text_from_array_content() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"mira revisemos este caso"}]}}"#;
+        assert_eq!(
+            extract_user_text_from_line(line),
+            Some("mira revisemos este caso".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_user_text_skips_image_block() {
+        // El primer bloque es imagen; debe tomar el text que sigue.
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{}},{"type":"text","text":"arregla el bug"}]}}"#;
+        assert_eq!(
+            extract_user_text_from_line(line),
+            Some("arregla el bug".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_user_text_string_content() {
+        let line = r#"{"type":"user","message":{"role":"user","content":"hola directo"}}"#;
+        assert_eq!(
+            extract_user_text_from_line(line),
+            Some("hola directo".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_user_text_non_user_line_is_none() {
+        let line = r#"{"type":"summary","summary":"x"}"#;
+        assert_eq!(extract_user_text_from_line(line), None);
+    }
+
+    #[test]
+    fn extract_user_text_invalid_json_is_none() {
+        assert_eq!(extract_user_text_from_line("{not json"), None);
+    }
+
+    #[test]
+    fn truncate_title_short_unchanged() {
+        assert_eq!(truncate_title("hola mundo", 48), "hola mundo");
+    }
+
+    #[test]
+    fn truncate_title_collapses_whitespace() {
+        assert_eq!(
+            truncate_title("hola\n  mundo   chao", 48),
+            "hola mundo chao"
+        );
+    }
+
+    #[test]
+    fn truncate_title_long_gets_ellipsis() {
+        let long = "a".repeat(100);
+        let t = truncate_title(&long, 10);
+        assert!(t.ends_with('\u{2026}'));
+        assert_eq!(t.chars().count(), 11); // 10 + elipsis
     }
 
     #[test]
