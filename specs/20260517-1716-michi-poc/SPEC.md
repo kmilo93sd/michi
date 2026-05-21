@@ -149,6 +149,57 @@ repos que no lo tienen → los vuelve reproducibles ("michi resuelve lo determin
 - **Cut-2:** leer `devcontainer.json` del repo si existe.
 - **Cut-3:** scaffolding (michi genera el `devcontainer.json`).
 
+### 5. Refinamientos post-consulta a Gemini (2026-05-21)
+
+Tras pasarle el [GEMINI_BRIEF.md](GEMINI_BRIEF.md), incorporamos (filtrando, no
+tragando):
+
+**Adoptado:**
+
+- **Capa agente por bind-mount del binario, no por imagen derivada:** michi guarda
+  el binario standalone de claude para Linux en `~/.michi/bin/` y lo monta
+  `-v .../claude:/usr/local/bin/claude:ro`. 0ms de build, actualizable sin rebuild.
+- **Imágenes slim por lenguaje, no base universal monstruo** (la universal de
+  Codespaces pesa 10GB+): detectar `Cargo.toml`→`rust:slim`, `package.json`→
+  `node:slim`, fallback `debian:slim`. Combinado con el bind-mount del binario →
+  usar imágenes oficiales **stock**, sin imagen michi propia (salvo `+git`).
+- **Split-anatomy para la pared #1:** código fuente en el FS de Windows (para que
+  el IDE del host ande) + dirs de build/caché en named volumes
+  (`CARGO_TARGET_DIR=/vols/target`, volumen en `node_modules`). Compilación a
+  velocidad ext4, edición desde Windows.
+- **DB isolation:** migraciones las corre Claude / el dev server, **nunca michi**
+  (michi solo provee el `DATABASE_URL`). **Redis: contenedor efímero por sesión**
+  (no multi-tenant — los DB 0-15 son globales y `FLUSHALL` es peligroso; pesa
+  ~10MiB). **GC de huérfanos al arranque:** tokio task que dropea DBs `session_*` y
+  contenedores `michi-*` sin sesión activa (anti-crash).
+- **devcontainer del repo con su propio compose de DB:** michi debe **pisar** el
+  `DATABASE_URL` para forzar su postgres compartido en vez del que levante el repo.
+- **Badge de activación** (adaptado a la regla "sin emojis"): dot de color + texto
+  (`● Container · node` / `Nativo` / `⚠ Nativo (Docker offline)`), click → popover
+  con recursos asignados y puertos mapeados.
+
+**Corregido / matizado (donde Gemini se equivocó):**
+
+- **Contención de git:** Gemini avisó de `.git/index.lock` compartido, pero **cada
+  worktree tiene su PROPIO index** (`.git/worktrees/<id>/index`) → `git
+  add/commit/status` no contienden ahí. Riesgo real (menor): `packed-refs.lock` y
+  sobre todo el **auto-gc** post-commit. Mitigación liviana: `git config gc.auto 0`
+  por worktree + serializar solo las mutaciones git **propias de michi** (worktree
+  add/remove) por la cola del worker (mpsc por repo). NO hace falta un mutex global
+  sobre cada `git` de cada agente.
+- **Arquitectura del contenedor:** no es "siempre x86_64" — en Apple Silicon los
+  contenedores son **arm64**. El binario de claude a montar debe ser
+  arch-matched (x64 + arm64), por la regla cross-platform.
+
+**Cola de git en Rust (respuesta a Gemini):** `HashMap<PathBuf /*git_dir*/,
+Sender<GitJob>>`, un consumer por repo; las mutaciones van por mpsc (serializadas
+por construcción, FIFO); read-only fuera de la cola. Encaja con `worker.rs` actual.
+
+**Sequencing:** DB isolation puede entregarse **en modo nativo primero** (inyectar
+`DATABASE_URL` a un postgres compartido sin contenedor de la sesión), desacoplando
+el diferenciador de mayor valor del wiring más riesgoso. Cut-1 (contenedor) y
+DB-isolation-nativa son ortogonales.
+
 ---
 
 ## Resumen
