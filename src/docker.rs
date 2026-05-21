@@ -381,6 +381,17 @@ pub fn build_resume_command(session_id: &str) -> Vec<String> {
     ]
 }
 
+/// Comando para CREAR una sesion nueva con un id elegido por michi:
+/// `claude --session-id <id>`. michi guarda ese id para poder reabrir luego con
+/// `--resume`. Falla si el id ya existe (no es idempotente: usar resume al reabrir).
+pub fn build_create_command(session_id: &str) -> Vec<String> {
+    vec![
+        "claude".to_string(),
+        "--session-id".to_string(),
+        session_id.to_string(),
+    ]
+}
+
 /// Garantiza que el binario de claude para Linux esté cacheado en `bin_dir`.
 /// Si ya existe, lo devuelve; si no, lo extrae con `docker` (lento la 1a vez).
 pub fn ensure_claude_binary(bin_dir: &Path, host_arch: &str) -> Result<PathBuf> {
@@ -792,6 +803,18 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--resume".to_string(),
+                "abc-123".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn create_command_uses_session_id_flag() {
+        assert_eq!(
+            build_create_command("abc-123"),
+            vec![
+                "claude".to_string(),
+                "--session-id".to_string(),
                 "abc-123".to_string()
             ]
         );

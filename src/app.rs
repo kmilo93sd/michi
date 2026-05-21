@@ -49,9 +49,10 @@ pub struct App {
     detected_close_confirm: Option<DetectedCloseConfirm>,
     /// Confirmacion pendiente para "traer a michi" una sesion externa.
     bring_confirm: Option<BringConfirm>,
-    /// session_id de Claude por job-id, para sesiones traidas (resume). En
-    /// memoria (v1, no persistido): tras reiniciar michi se relanza fresh.
-    brought_resume: HashMap<String, String>,
+    /// Estado de sesion managed por job-id: session_id de Claude, si ya se lanzo
+    /// (--session-id vs --resume) y si va forzada a nativo (traidas). En memoria
+    /// (v1, no persistido): tras reiniciar michi se pierde el link al session_id.
+    managed: HashMap<String, ManagedSession>,
     /// Pendiente de eleccion: el usuario hizo click en ▶ de un repo y debe
     /// decidir si abrir sesion directa o worktree nuevo.
     start_choice: Option<StartChoice>,
@@ -130,6 +131,16 @@ struct DetectedCloseConfirm {
     tree_pids: Vec<u32>,
 }
 
+/// Estado en memoria de una sesion managed (la que michi lanza/controla).
+struct ManagedSession {
+    /// session_id de Claude (generado por michi, o el de la externa traida).
+    claude_session_id: String,
+    /// Si ya se lanzo (1a vez se crea con --session-id; al reabrir, --resume).
+    started: bool,
+    /// Forzar nativo (traidas: su historial esta indexado por la cwd del host).
+    native: bool,
+}
+
 /// Confirmacion para "traer a michi" una sesion externa: cierra la externa y
 /// la reabre con `claude --resume` adentro de michi.
 struct BringConfirm {
@@ -171,6 +182,10 @@ enum PrepBannerAction {
 enum JobMenu {
     Select,
     OpenFolder,
+    /// Detener: baja el contenedor/PTY pero conserva el job (Paused) + session_id.
+    Stop,
+    /// Reabrir una sesion detenida (resume).
+    Reopen,
     Close,
 }
 
@@ -209,7 +224,7 @@ impl App {
             close_confirm: None,
             detected_close_confirm: None,
             bring_confirm: None,
-            brought_resume: HashMap::new(),
+            managed: HashMap::new(),
             start_choice: None,
             terminals: HashMap::new(),
             pty_tx,
@@ -372,11 +387,25 @@ impl App {
         let claude_bin = docker::claude_binary_path(&self.claude_bin_dir, host_arch);
         let claude_ready = claude_bin.is_file();
 
-        // Sesiones "traidas" se retoman con `claude --resume`. El historial vive
-        // en ~/.claude del host (no montado en contenedor) -> corren nativas.
-        let resume = self.brought_resume.get(&job.id).cloned();
+        // Cada job managed tiene un session_id de Claude: generado por michi para
+        // sesiones nuevas (se crea con --session-id), o el de la externa para las
+        // traidas. Al reabrir se usa --resume. Las traidas van nativas (historial
+        // indexado por la cwd del host, no montada en el contenedor).
+        let (session_id, first_launch, force_native) = {
+            let entry = self
+                .managed
+                .entry(job.id.clone())
+                .or_insert_with(|| ManagedSession {
+                    claude_session_id: uuid::Uuid::new_v4().to_string(),
+                    started: false,
+                    native: false,
+                });
+            let first = !entry.started;
+            entry.started = true;
+            (entry.claude_session_id.clone(), first, entry.native)
+        };
 
-        if resume.is_none()
+        if !force_native
             && self.docker_status.is_available()
             && !claude_ready
             && !self.claude_acquire_started
@@ -415,16 +444,18 @@ impl App {
             env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             memory: Some("4g".to_string()),
             cpus: Some("2".to_string()),
-            // En resume forzamos nativo (binario None) porque el contenedor no
-            // tiene montado el historial de ~/.claude.
-            claude_binary_host: if resume.is_some() {
+            // Las traidas (force_native) corren nativas: su historial vive en la
+            // cwd del host, no montada en el contenedor.
+            claude_binary_host: if force_native {
                 None
             } else {
                 claude_ready.then_some(claude_bin)
             },
-            command: match &resume {
-                Some(sid) => docker::build_resume_command(sid),
-                None => docker::build_session_command(None),
+            // 1a vez: crear la sesion con --session-id; al reabrir: --resume.
+            command: if first_launch {
+                docker::build_create_command(&session_id)
+            } else {
+                docker::build_resume_command(&session_id)
             },
         };
         docker::plan_launch(&self.docker_status, &spec)
@@ -861,7 +892,14 @@ impl App {
             .unwrap_or_else(|| "repo".into());
         let job = Job::for_brought_session(&ws_name, &repo, &c.cwd);
         let job_id = job.id.clone();
-        self.brought_resume.insert(job_id.clone(), c.session_id);
+        self.managed.insert(
+            job_id.clone(),
+            ManagedSession {
+                claude_session_id: c.session_id,
+                started: true,
+                native: true,
+            },
+        );
         self.jobs.push(job);
         self.selected_job_id = Some(job_id);
         self.selected_detected_pid = None;
@@ -1426,6 +1464,36 @@ impl App {
 
         let outcome = render_job_header(ui, &job, &self.theme);
 
+        // Sesion detenida: no spawneamos terminal; mostramos placeholder + Reabrir.
+        if job.status == JobStatus::Paused {
+            let rect = ui.available_rect_before_wrap();
+            ui.painter().rect_filled(rect, 0.0, self.theme.bg_base);
+            ui.add_space(28.0);
+            let mut reopen = false;
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new("Sesion detenida").color(self.theme.text_primary));
+                ui.add_space(4.0);
+                ui.small(
+                    egui::RichText::new(
+                        "El contenedor esta abajo. La conversacion se conserva (resume).",
+                    )
+                    .color(self.theme.text_muted),
+                );
+                ui.add_space(14.0);
+                if ui
+                    .add(egui::Button::new("Reabrir"))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    reopen = true;
+                }
+            });
+            if reopen {
+                self.reopen_session(job_id);
+            }
+            return outcome.close_clicked.then(|| job.id.clone());
+        }
+
         let ctx = ui.ctx().clone();
         match self.ensure_terminal_for(&ctx, job_id) {
             Some(terminal) => {
@@ -1756,10 +1824,41 @@ impl App {
                     self.last_error = Some(format!("no se pudo abrir la carpeta: {e:#}"));
                 }
             }
+            JobMenu::Stop => {
+                self.stop_session(job_id);
+            }
+            JobMenu::Reopen => {
+                self.reopen_session(job_id);
+            }
             JobMenu::Close => {
                 self.request_close_job(job_id);
             }
         }
+    }
+
+    /// Detiene una sesion managed: baja el contenedor y el PTY, pero conserva el
+    /// job (status Paused) + su session_id para reabrirla luego con --resume.
+    fn stop_session(&mut self, job_id: &str) {
+        docker::remove_container(&docker::container_name(job_id));
+        self.terminals.remove(job_id);
+        if let Some(j) = self.jobs.iter_mut().find(|j| j.id == job_id) {
+            j.status = JobStatus::Paused;
+        }
+        self.last_info =
+            Some("Sesion detenida (contenedor abajo, la conversacion se conserva).".into());
+        self.mark_dirty();
+        self.push_status_targets();
+    }
+
+    /// Reabre una sesion detenida: la marca Idle y la selecciona; el proximo
+    /// render respawnea el terminal con `claude --resume <session_id>`.
+    fn reopen_session(&mut self, job_id: &str) {
+        if let Some(j) = self.jobs.iter_mut().find(|j| j.id == job_id) {
+            j.status = JobStatus::Idle;
+        }
+        self.selected_job_id = Some(job_id.to_string());
+        self.selected_detected_pid = None;
+        self.mark_dirty();
     }
 }
 
@@ -2166,6 +2265,16 @@ fn render_job_card(
     response.context_menu(|ui| {
         if ui.button("Ir a la sesion").clicked() {
             menu_pick = Some(JobMenu::Select);
+            ui.close_kind(egui::UiKind::Menu);
+        }
+        ui.separator();
+        if job.status == JobStatus::Paused {
+            if ui.button("Reabrir").clicked() {
+                menu_pick = Some(JobMenu::Reopen);
+                ui.close_kind(egui::UiKind::Menu);
+            }
+        } else if ui.button("Detener").clicked() {
+            menu_pick = Some(JobMenu::Stop);
             ui.close_kind(egui::UiKind::Menu);
         }
         ui.separator();
