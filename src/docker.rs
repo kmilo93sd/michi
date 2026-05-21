@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use anyhow::{Context, Result, bail};
+
 /// Estado de Docker en la maquina, desde el punto de vista de michi.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockerStatus {
@@ -272,6 +274,61 @@ pub fn claude_binary_path(bin_dir: &Path, host_arch: &str) -> PathBuf {
         "claude-linux-{}",
         arch_to_docker_platform(host_arch)
     ))
+}
+
+/// Argumentos de `docker` para extraer el binario standalone de claude de un
+/// contenedor throwaway: instala claude en una base debian y deja el binario
+/// (deref del symlink) en `<out_dir>/<target_filename>`. Pura (testeable).
+pub fn build_extract_args(out_dir: &Path, target_filename: &str) -> Vec<String> {
+    let script = format!(
+        "apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null 2>&1 \
+         && curl -fsSL https://claude.ai/install.sh -o /tmp/i.sh && bash /tmp/i.sh >/dev/null 2>&1 \
+         && cp -L /root/.local/bin/claude /out/{target_filename}"
+    );
+    vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-v".to_string(),
+        format!("{}:/out", out_dir.display()),
+        "debian:stable-slim".to_string(),
+        "bash".to_string(),
+        "-c".to_string(),
+        script,
+    ]
+}
+
+/// Comando a correr dentro de la sesion: `claude`, con la tarea inicial como
+/// primer prompt si la hay (no vacía).
+pub fn build_session_command(initial_task: Option<&str>) -> Vec<String> {
+    match initial_task.map(str::trim) {
+        Some(task) if !task.is_empty() => vec!["claude".to_string(), task.to_string()],
+        _ => vec!["claude".to_string()],
+    }
+}
+
+/// Garantiza que el binario de claude para Linux esté cacheado en `bin_dir`.
+/// Si ya existe, lo devuelve; si no, lo extrae con `docker` (lento la 1a vez).
+pub fn ensure_claude_binary(bin_dir: &Path, host_arch: &str) -> Result<PathBuf> {
+    let target = claude_binary_path(bin_dir, host_arch);
+    if target.is_file() {
+        return Ok(target);
+    }
+    std::fs::create_dir_all(bin_dir).with_context(|| format!("creando {}", bin_dir.display()))?;
+    let filename = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("nombre de binario inválido")?;
+    let status = Command::new("docker")
+        .args(build_extract_args(bin_dir, filename))
+        .status()
+        .context("ejecutando docker para extraer el binario de claude")?;
+    if !status.success() {
+        bail!("la extracción del binario de claude falló (docker {status})");
+    }
+    if !target.is_file() {
+        bail!("docker no dejó el binario en {}", target.display());
+    }
+    Ok(target)
 }
 
 #[cfg(test)]
@@ -568,5 +625,46 @@ mod tests {
         spec.claude_binary_host = None;
         let a = build_run_args(&spec);
         assert!(!a.iter().any(|x| x.contains(CONTAINER_CLAUDE_PATH)));
+    }
+
+    #[test]
+    fn extract_args_mount_out_and_install_to_target() {
+        let a = build_extract_args(Path::new("/m/bin"), "claude-linux-amd64");
+        assert_eq!(a[0], "run");
+        assert!(a.contains(&"--rm".to_string()));
+        assert!(a.contains(&"debian:stable-slim".to_string()));
+        let mount = format!("{}:/out", Path::new("/m/bin").display());
+        assert!(a.contains(&mount), "args: {a:?}");
+        // El script instala via install.sh y copia el binario al target en /out.
+        let script = a.last().unwrap();
+        assert!(script.contains("install.sh"));
+        assert!(script.contains("/out/claude-linux-amd64"));
+    }
+
+    #[test]
+    fn session_command_without_task_is_just_claude() {
+        assert_eq!(build_session_command(None), vec!["claude".to_string()]);
+        assert_eq!(
+            build_session_command(Some("   ")),
+            vec!["claude".to_string()]
+        );
+    }
+
+    #[test]
+    fn session_command_with_task_passes_it_as_prompt() {
+        assert_eq!(
+            build_session_command(Some("arregla el CORS")),
+            vec!["claude".to_string(), "arregla el CORS".to_string()]
+        );
+    }
+
+    #[test]
+    fn ensure_claude_binary_short_circuits_when_present() {
+        // Si el binario ya esta cacheado, devuelve su ruta sin tocar docker.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let expected = claude_binary_path(tmp.path(), "x86_64");
+        std::fs::write(&expected, "fake-binary").unwrap();
+        let got = ensure_claude_binary(tmp.path(), "x86_64").unwrap();
+        assert_eq!(got, expected);
     }
 }
