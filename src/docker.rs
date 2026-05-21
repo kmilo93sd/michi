@@ -214,6 +214,31 @@ pub fn remove_container(name: &str) {
     let _ = Command::new("docker").args(["rm", "-f", name]).output();
 }
 
+/// Parsea la salida de `docker ps -aq` (un id por linea) en lista de ids.
+/// Pure: testeable sin docker.
+pub fn parse_container_ids(stdout: &str) -> Vec<String> {
+    stdout.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+/// Borra todos los contenedores `michi-*` (huerfanos de cierres/crashes previos).
+/// Se llama al arrancar michi: en ese momento no hay sesiones managed vivas, asi
+/// que cualquier `michi-*` es basura que sobrevivio a un cierre sucio. Best-effort.
+pub fn gc_orphan_containers() {
+    let Ok(out) = Command::new("docker")
+        .args(["ps", "-aq", "--filter", "name=michi-"])
+        .output()
+    else {
+        return;
+    };
+    let ids = parse_container_ids(&String::from_utf8_lossy(&out.stdout));
+    if ids.is_empty() {
+        return;
+    }
+    let mut args = vec!["rm".to_string(), "-f".to_string()];
+    args.extend(ids);
+    let _ = Command::new("docker").args(&args).output();
+}
+
 /// Como termino lanzandose una sesion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
@@ -751,6 +776,13 @@ mod tests {
     #[test]
     fn container_name_is_prefixed() {
         assert_eq!(container_name("job-1"), "michi-job-1");
+    }
+
+    #[test]
+    fn parse_container_ids_splits_and_trims() {
+        assert_eq!(parse_container_ids("abc\ndef\n"), vec!["abc", "def"]);
+        assert!(parse_container_ids("\n  \n").is_empty());
+        assert!(parse_container_ids("").is_empty());
     }
 
     #[test]
