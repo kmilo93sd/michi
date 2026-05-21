@@ -114,16 +114,25 @@ postgres sin colisión (cada una en su DB); al cerrar, se limpia.
 - [x] D.1 - Detección de Docker: módulo `docker.rs` (`detect_docker() -> DockerStatus`,
   con `Unavailable { BinaryNotFound | DaemonNotResponding }` como fallback). 5 tests
   TDD. El cableado de la degradación a nativo al *lanzar* va con D.2.
-- [ ] D.1b - Puertos: published ports (`-p hostPort:8080`) dan URL estable por
-  sesión (spike ✅, sin reverse proxy en V1).
-- [ ] D.2 - Lanzar sesión managed dentro de un contenedor: worktree montado como
-  volumen, `claude` corriendo adentro, PTY conectado.
-- [ ] D.3 - Port publishing/proxy por contenedor (host port único o reverse proxy
-  → URL estable por sesión).
-- [ ] D.4 - Volúmenes compartidos de caché de deps (cargo registry, pnpm store)
-  read-mostly.
-- [ ] D.5 - Lifecycle: build/start/stop/destroy atado al lifecycle de la sesión.
-- [ ] D.6 - Leer `devcontainer.json` si existe (config opcional).
+- [x] D.2 - `build_run_args()` (#35): arma el comando `docker run` (mounts, creds
+  read-only, puertos publicados, env, caps de memoria/cpu). Función pura testeable.
+- [x] D.2a - `plan_launch()` (#36): planner contenedor-vs-nativo (degradación de la
+  regla 4); produce command/args/env/cwd que mapean 1:1 a `JobTerminal::spawn`.
+
+Arquitectura confirmada (ver SPEC.md §4): **3 capas** (runtime del repo / agente
+michi / infra michi) sobre el **estándar devcontainer**. El wiring va por cuts:
+
+- [ ] D.3 (Cut-1) - **Wiring real**: llamar `plan_launch` al crear job → pasar el
+  `LaunchPlan` a `JobTerminal::spawn`. Incluye base universal configurable, capa
+  claude (instalador standalone), caches en named volumes, activación
+  default-inteligente + toggle override en el modal, y badge Container/Native en la
+  card. (Inyecta de paso la tarea inicial como primer prompt.)
+- [ ] D.4 (Cut-2) - Leer `devcontainer.json` del repo si existe (respeta el estándar).
+- [ ] D.5 (Cut-3) - Scaffolding: michi genera un `devcontainer.json` para repos sin él.
+- [ ] D.6 - Lifecycle: build/start/stop/destroy + cache de imagen derivada (base +
+  capa agente) para no romper "create en <5s".
+- [ ] D.7 - Puertos: published ports (`-p host:8080`) = URL estable por sesión
+  (spike ✅, sin reverse proxy en V1).
 
 **Criterio:** crear un trabajo levanta su contenedor, `claude` corre adentro, el
 dev server queda accesible por una URL/puerto estable, y cerrar el trabajo

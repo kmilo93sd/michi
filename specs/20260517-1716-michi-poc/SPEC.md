@@ -107,6 +107,48 @@ servicios compartidos detrás, todo observable desde un panel nativo.
   goal de "create en <5s".
 - Nivel 5 (checkpoint/restore) fuera de mesa en Windows hoy.
 
+### 4. Arquitectura del contenedor (2026-05-21): modelo de 3 capas + estándar devcontainer
+
+**Estándar adoptado: dev containers (containers.dev).** Spec abierta (Microsoft)
+que usan VS Code, GitHub Codespaces y Gitpod. Define el entorno de un repo en
+`devcontainer.json` (imagen / Dockerfile / compose + "features" componibles).
+michi se para sobre este estándar en vez de inventar; incluso puede invocar
+`@devcontainers/cli` (la implementación de referencia) para el lifecycle. Si un
+repo no tiene devcontainer → **imagen universal de fallback** (modelo Codespaces).
+
+**Modelo de 3 capas:**
+
+```
+Capa INFRA (michi)     → puertos publicados, DB efímera, volúmenes de caché
+Capa AGENTE (michi)    → claude + git, inyectados SIEMPRE (instalador standalone)
+Capa RUNTIME (el repo) → devcontainer.json / Dockerfile, o base universal michi
+```
+
+El repo es la **fuente de verdad del runtime**; michi le agrega la capa de agente
+encima. Así no se enumeran lenguajes: el repo (o la base universal) trae
+node/rust/python y michi solo garantiza que `claude` esté presente. El agente se
+layerea con el **instalador standalone** de claude (binario, sin dependencia de
+node) para poder ir sobre cualquier base.
+
+**Velocidad:** caché de deps en **named volumes** (`~/.cargo`, pnpm store,
+`~/.npm`), nunca en bind mount de path Windows (pared #1 medida en el spike).
+
+**Activación (default inteligente + override 1 click, no checkbox tonto):**
+
+- Repo con `devcontainer.json` + Docker → contenedor (alta confianza).
+- Repo sin devcontainer + Docker → contenedor con base universal (badge visible).
+- Sin Docker, o "usar nativo" → nativo (fallback, el flujo de hoy).
+
+**Bonus (valor michi puro):** michi puede **generar** un `devcontainer.json` para
+repos que no lo tienen → los vuelve reproducibles ("michi resuelve lo determinista").
+
+**Camino incremental:**
+
+- **Cut-1:** base universal configurable + capa claude (standalone) + caches en
+  volúmenes; activación default-inteligente con toggle override + badge.
+- **Cut-2:** leer `devcontainer.json` del repo si existe.
+- **Cut-3:** scaffolding (michi genera el `devcontainer.json`).
+
 ---
 
 ## Resumen
