@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 use crate::claude_config::{self, ClaudeInventory};
 use crate::port_alloc;
 use crate::port_detector;
+use crate::resource_monitor;
 use crate::state::{self, AppState, Job, JobStatus, Workspace};
 use crate::system;
 use crate::terminal::{self, JobTerminal};
@@ -57,6 +58,11 @@ pub struct App {
     /// una sola vez al boot porque no cambia con frecuencia. Si cambia,
     /// el usuario tiene que reabrir michi.
     claude_globals: ClaudeInventory,
+    /// Recursos (RAM + nº procesos) por job-id, refrescados con throttle.
+    /// Solo tienen entrada los jobs con terminal activo.
+    resource_snapshots: HashMap<String, resource_monitor::SessionResources>,
+    /// Ultima vez que se recomputaron los resource_snapshots.
+    last_resource_poll: Option<Instant>,
 }
 
 /// El usuario hizo click en ▶ de un workspace o repo. Mostrar dialogo
@@ -152,9 +158,37 @@ impl App {
             pty_rx,
             next_backend_id: 1,
             claude_globals: claude_config::read_globals(),
+            resource_snapshots: HashMap::new(),
+            last_resource_poll: None,
         };
         app.push_status_targets();
         app
+    }
+
+    /// Recomputa los recursos (RAM + procesos) de cada terminal activo, con
+    /// throttle. Hace UN snapshot del OS y deriva el subarbol de cada job —
+    /// barato aunque haya varias sesiones.
+    fn maybe_poll_resources(&mut self, ctx: &egui::Context) {
+        const RESOURCE_POLL_INTERVAL: Duration = Duration::from_secs(3);
+        let due = self
+            .last_resource_poll
+            .is_none_or(|t| t.elapsed() >= RESOURCE_POLL_INTERVAL);
+        if !due || self.terminals.is_empty() {
+            return;
+        }
+        let all = resource_monitor::snapshot_all_processes();
+        self.resource_snapshots = self
+            .terminals
+            .iter()
+            .map(|(job_id, term)| {
+                let subtree = resource_monitor::collect_subtree(&all, term.root_pid);
+                (job_id.clone(), resource_monitor::aggregate(&subtree))
+            })
+            .collect();
+        self.last_resource_poll = Some(Instant::now());
+        // Repintar pronto para que el numero se actualice aunque no haya
+        // otra interaccion.
+        ctx.request_repaint_after(RESOURCE_POLL_INTERVAL);
     }
 
     /// Crea (lazy) el terminal asociado al job. Si la creacion falla
@@ -749,6 +783,7 @@ impl eframe::App for App {
         self.drain_worker_events(&ctx);
         self.drain_pty_events();
         self.maybe_persist();
+        self.maybe_poll_resources(&ctx);
 
         if self.dirty_since.is_some() {
             ctx.request_repaint_after(SAVE_DEBOUNCE);
@@ -1028,7 +1063,15 @@ impl App {
                             for job in ws_jobs {
                                 let selected = self.selected_job_id.as_deref() == Some(&job.id);
                                 let env = self.env_for_job(job);
-                                let outcome = render_job_card(ui, job, selected, &self.theme, &env);
+                                let resources = self.resource_snapshots.get(&job.id).copied();
+                                let outcome = render_job_card(
+                                    ui,
+                                    job,
+                                    selected,
+                                    &self.theme,
+                                    &env,
+                                    resources,
+                                );
                                 if outcome.clicked {
                                     clicked_id = Some(job.id.clone());
                                 }
@@ -1604,6 +1647,7 @@ fn render_job_card(
     selected: bool,
     theme: &Theme,
     env: &BTreeMap<String, String>,
+    resources: Option<resource_monitor::SessionResources>,
 ) -> JobCardOutcome {
     let full_width = ui.available_width();
 
@@ -1611,7 +1655,18 @@ fn render_job_card(
     // Solo se muestra cuando hay env vars de puerto (rango asignado +
     // workspace tiene slots detectados).
     let ports_line = ports_one_liner(env);
-    let extra_height = if ports_line.is_some() { 14.0 } else { 0.0 };
+    // Linea opcional de recursos: "3 procs · 240 MB". Solo si hay snapshot
+    // (el job tiene terminal activo) y al menos un proceso.
+    let resources_line = resources
+        .filter(|r| r.process_count > 0)
+        .map(|r| format!("{} procs \u{B7} {}", r.process_count, r.memory_human()));
+    let mut extra_height = 0.0;
+    if ports_line.is_some() {
+        extra_height += 14.0;
+    }
+    if resources_line.is_some() {
+        extra_height += 14.0;
+    }
 
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(full_width, theme.card_row_height + extra_height),
@@ -1699,6 +1754,11 @@ fn render_job_card(
                 .monospace(),
         );
         label_resp.on_hover_text(ports_tooltip(env));
+    }
+
+    // Linea opcional de recursos del arbol de procesos de la sesion.
+    if let Some(line) = resources_line {
+        child.label(egui::RichText::new(line).small().color(theme.text_muted));
     }
 
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);

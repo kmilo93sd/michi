@@ -26,6 +26,10 @@ use egui_term::{BackendSettings, PtyEvent, TerminalBackend};
 /// poder enrutar eventos de PTY de vuelta a la app.
 pub struct JobTerminal {
     pub backend: TerminalBackend,
+    /// PID del proceso raiz del PTY (el shell wrapper o claude directo). Se
+    /// usa para construir el arbol de procesos de la sesion y agregar sus
+    /// recursos. `pty_id()` de egui_term, pese al nombre, es el OS PID.
+    pub root_pid: u32,
 }
 
 impl JobTerminal {
@@ -46,7 +50,8 @@ impl JobTerminal {
         let backend = TerminalBackend::new(backend_id, ctx, pty_tx, settings)
             .map_err(|e| anyhow::anyhow!("creando TerminalBackend: {e}"))
             .context("spawning PTY backend")?;
-        Ok(Self { backend })
+        let root_pid = backend.pty_id();
+        Ok(Self { backend, root_pid })
     }
 }
 
