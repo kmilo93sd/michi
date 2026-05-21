@@ -227,6 +227,11 @@ impl App {
                 .unwrap_or_else(|| std::path::PathBuf::from(".michi/bin")),
             claude_acquire_started: false,
         };
+        // GC de contenedores michi-* huerfanos de corridas previas (best-effort,
+        // en background para no bloquear el arranque).
+        if app.docker_status.is_available() {
+            std::thread::spawn(docker::gc_orphan_containers);
+        }
         app.push_status_targets();
         app
     }
@@ -679,6 +684,9 @@ impl App {
     /// lista en memoria y libera el terminal embebido. No corre `git worktree
     /// remove` porque no hay worktree dedicado.
     fn close_in_place_session(&mut self, job_id: &str) {
+        // Si la sesion corria en contenedor, bajarlo (best-effort). Para nativas
+        // no existe ese contenedor y el rm -f es un no-op silencioso.
+        docker::remove_container(&docker::container_name(job_id));
         self.jobs.retain(|j| j.id != job_id);
         self.terminals.remove(job_id);
         if self.selected_job_id.as_deref() == Some(job_id) {
@@ -1099,6 +1107,7 @@ impl App {
                     self.last_error = Some(message);
                 }
                 WorkerEvent::WorktreeRemoved { job_id } => {
+                    docker::remove_container(&docker::container_name(&job_id));
                     self.jobs.retain(|j| j.id != job_id);
                     if self.selected_job_id.as_deref() == Some(job_id.as_str()) {
                         self.selected_job_id = self.jobs.first().map(|j| j.id.clone());
