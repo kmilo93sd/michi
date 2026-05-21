@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::resource_monitor::{self, ProcInfo, ProcessBreakdown, SessionResources};
+use crate::resource_monitor::{self, ProcDetail, ProcInfo, ProcessBreakdown, SessionResources};
 
 /// Estado que Claude Code reporta para una sesion en
 /// `~/.claude/sessions/<pid>.json`. Es el estado REAL (lo emite el propio
@@ -119,6 +119,9 @@ pub struct DetectedSession {
     /// Titulo legible (primer mensaje del usuario). Lo puebla el App desde
     /// su cache; `detect_sessions` lo deja en None.
     pub title: Option<String>,
+    /// Lista de procesos del arbol (para el panel de detalle), ordenada por
+    /// memoria desc.
+    pub processes: Vec<ProcDetail>,
 }
 
 /// `true` si el proceso es el CLI de Claude Code (no la app de escritorio
@@ -174,6 +177,7 @@ pub fn detect_sessions(all: &[ProcInfo]) -> Vec<DetectedSession> {
                 breakdown: resource_monitor::classify_processes(&subtree),
                 status,
                 title: None,
+                processes: resource_monitor::subtree_details(&subtree),
             }
         })
         .collect();

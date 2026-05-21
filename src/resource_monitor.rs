@@ -90,6 +90,36 @@ pub fn aggregate(subtree: &[ProcInfo]) -> SessionResources {
     }
 }
 
+/// Info liviana de un proceso para mostrar en el panel de detalle (sin
+/// cmd/cwd pesados). Es lo que el usuario ve al seleccionar una sesion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcDetail {
+    pub pid: u32,
+    pub name: String,
+    pub memory_bytes: u64,
+}
+
+impl ProcDetail {
+    pub fn memory_human(&self) -> String {
+        humanize_bytes(self.memory_bytes)
+    }
+}
+
+/// Convierte un subarbol en una lista de `ProcDetail` ordenada por memoria
+/// descendente (los que mas consumen arriba). Funcion pura.
+pub fn subtree_details(subtree: &[ProcInfo]) -> Vec<ProcDetail> {
+    let mut details: Vec<ProcDetail> = subtree
+        .iter()
+        .map(|p| ProcDetail {
+            pid: p.pid,
+            name: p.name.clone(),
+            memory_bytes: p.memory_bytes,
+        })
+        .collect();
+    details.sort_by_key(|d| std::cmp::Reverse(d.memory_bytes));
+    details
+}
+
 /// Desglose de los procesos "notables" del arbol de una sesion: cuantos
 /// shells abrio, que runtimes/servers levanto, y si esta usando docker.
 /// Es lo que michi muestra como chips en la card ("1 shell · node · docker").
@@ -340,6 +370,24 @@ mod tests {
             cwd: None,
             cmd: Vec::new(),
         }
+    }
+
+    #[test]
+    fn subtree_details_sorted_by_memory_desc() {
+        let tree = vec![
+            proc(1, None, 100),
+            proc(2, Some(1), 500),
+            proc(3, Some(1), 250),
+        ];
+        let details = subtree_details(&tree);
+        let mems: Vec<u64> = details.iter().map(|d| d.memory_bytes).collect();
+        assert_eq!(mems, vec![500, 250, 100], "ordenado por mem desc");
+    }
+
+    #[test]
+    fn subtree_details_preserves_all_processes() {
+        let tree = vec![proc(1, None, 10), proc(2, Some(1), 20)];
+        assert_eq!(subtree_details(&tree).len(), 2);
     }
 
     #[test]

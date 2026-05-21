@@ -71,6 +71,9 @@ pub struct App {
     /// Cache de titulos de sesion por session_id (primer mensaje del .jsonl).
     /// Se lee una vez por sesion: el primer mensaje no cambia.
     session_titles: HashMap<String, String>,
+    /// PID de la sesion DETECTADA seleccionada (para mostrar su panel de
+    /// detalle). Mutuamente excluyente con `selected_job_id`.
+    selected_detected_pid: Option<u32>,
 }
 
 /// El usuario hizo click en ▶ de un workspace o repo. Mostrar dialogo
@@ -170,6 +173,7 @@ impl App {
             last_resource_poll: None,
             detected_sessions: Vec::new(),
             session_titles: HashMap::new(),
+            selected_detected_pid: None,
         };
         app.push_status_targets();
         app
@@ -947,13 +951,23 @@ impl eframe::App for App {
             });
 
         let selected_id = self.selected_job_id.clone();
+        // Sesion detectada seleccionada (clon para evitar borrow del self
+        // dentro del closure del panel).
+        let selected_detected = self.selected_detected_pid.and_then(|pid| {
+            self.detected_sessions
+                .iter()
+                .find(|s| s.pid == pid)
+                .cloned()
+        });
         let mut empty_state_action = EmptyStateAction::None;
         let mut close_clicked: Option<String> = None;
         let has_workspaces = !self.workspaces.is_empty();
         egui::CentralPanel::default()
             .frame(self.theme.base_panel_frame())
             .show_inside(ui, |ui| {
-                if self.jobs.is_empty() {
+                if let Some(sess) = &selected_detected {
+                    render_detected_detail(ui, sess, &self.theme);
+                } else if self.jobs.is_empty() {
                     empty_state_action = render_empty_state(ui, has_workspaces);
                 } else if let Some(id) = selected_id {
                     close_clicked = self.render_selected_job(ui, &id);
@@ -1042,6 +1056,7 @@ impl App {
         let mut workspace_menu_pick: Option<(Workspace, WorkspaceMenu)> = None;
         let mut job_menu_pick: Option<(String, JobMenu)> = None;
         let mut prep_action_for: Option<(String, PrepBannerAction)> = None;
+        let mut detected_clicked: Option<u32> = None;
 
         // Clone para evitar lifetime acrobatics: el loop necesita iterar workspaces
         // y simultaneamente leer self.collapsed_workspaces y jobs_for_workspace.
@@ -1124,13 +1139,17 @@ impl App {
                         }
 
                         // Sesiones Claude externas (no lanzadas por michi) cuyo
-                        // cwd cae bajo este workspace. Read-only: solo monitoreo.
+                        // cwd cae bajo este workspace. Clickeables para ver su
+                        // panel de detalle de procesos.
                         for sess in detected_sessions.iter().filter(|s| {
                             s.cwd.as_deref().is_some_and(|cwd| {
                                 claude_sessions::cwd_belongs_to_workspace(cwd, &ws.path)
                             })
                         }) {
-                            render_detected_card(ui, sess, &ws.path, &self.theme);
+                            let selected = self.selected_detected_pid == Some(sess.pid);
+                            if render_detected_card(ui, sess, &ws.path, selected, &self.theme) {
+                                detected_clicked = Some(sess.pid);
+                            }
                         }
                     }
                 }
@@ -1183,7 +1202,15 @@ impl App {
 
         if let Some(id) = clicked_id {
             self.selected_job_id = Some(id);
+            // Seleccionar un job managed limpia la seleccion de detectada.
+            self.selected_detected_pid = None;
             self.mark_dirty();
+        }
+        if let Some(pid) = detected_clicked {
+            self.selected_detected_pid = Some(pid);
+            // Seleccionar una detectada limpia la seleccion de job managed
+            // (el panel central muestra una u otra, no ambas).
+            self.selected_job_id = None;
         }
         if let Some(id) = toggle_ws {
             if !self.collapsed_workspaces.remove(&id) {
@@ -1820,15 +1847,16 @@ fn render_job_card(
     }
 }
 
-/// Renderiza una sesion Claude DETECTADA (externa a michi): read-only, solo
-/// monitoreo. Se distingue de las managed por un badge "externa" + estilo
-/// atenuado. Muestra el subpath del cwd relativo al workspace y los recursos.
+/// Renderiza una sesion Claude DETECTADA (externa a michi). Clickeable para
+/// abrir su panel de detalle. Devuelve `true` si se clickeo. Se distingue de
+/// las managed por un badge "externa".
 fn render_detected_card(
     ui: &mut egui::Ui,
     sess: &claude_sessions::DetectedSession,
     workspace_path: &std::path::Path,
+    selected: bool,
     theme: &Theme,
-) {
+) -> bool {
     let full_width = ui.available_width();
     let has_resources = sess.resources.process_count > 0;
     let has_chips = !sess.breakdown.is_empty();
@@ -1839,10 +1867,23 @@ fn render_detected_card(
     if has_chips {
         extra_height += 22.0;
     }
-    let (rect, _response) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         egui::vec2(full_width, theme.card_row_height + extra_height),
-        egui::Sense::hover(),
+        egui::Sense::click(),
     );
+
+    let bg = if selected {
+        theme.bg_card_selected
+    } else if response.contains_pointer() {
+        theme.bg_card_hover
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 4.0, bg);
+    if selected {
+        let bar = egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height()));
+        ui.painter().rect_filled(bar, 0.0, theme.accent);
+    }
 
     paint_tree_line(ui, rect, theme, theme.tree_line_ws_x);
 
@@ -1929,6 +1970,94 @@ fn render_detected_card(
             }
         });
     }
+
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+/// Panel central de detalle de una sesion DETECTADA: header con titulo +
+/// cwd + estado, y la lista completa de procesos del arbol (nombre, pid,
+/// RAM) ordenada por consumo. Es lo que reemplaza al terminal embebido para
+/// sesiones que michi no controla.
+fn render_detected_detail(
+    ui: &mut egui::Ui,
+    sess: &claude_sessions::DetectedSession,
+    theme: &Theme,
+) {
+    ui.add_space(12.0);
+    // Titulo
+    let title = sess
+        .title
+        .clone()
+        .unwrap_or_else(|| format!("Sesion pid {}", sess.pid));
+    ui.heading(title);
+    ui.add_space(4.0);
+
+    // cwd
+    if let Some(cwd) = &sess.cwd {
+        ui.label(
+            egui::RichText::new(cwd.to_string_lossy().replace('\\', "/")).color(theme.text_muted),
+        );
+    }
+
+    // Estado + badge externa + recursos agregados.
+    ui.horizontal(|ui| {
+        let (dot, color) = claude_status_visual(sess.status, theme);
+        ui.colored_label(color, dot.to_string());
+        ui.label(sess.status.label());
+        ui.label(egui::RichText::new("\u{B7}").color(theme.text_muted));
+        ui.label(
+            egui::RichText::new(format!(
+                "{} procesos \u{B7} {}",
+                sess.resources.process_count,
+                sess.resources.memory_human()
+            ))
+            .color(theme.text_muted),
+        );
+        ui.label(
+            egui::RichText::new("\u{B7} externa")
+                .small()
+                .color(theme.text_muted),
+        )
+        .on_hover_text("michi no controla el terminal de esta sesion (corre fuera).");
+    });
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    ui.label(
+        egui::RichText::new("Procesos del arbol")
+            .strong()
+            .color(theme.text_primary),
+    );
+    ui.add_space(6.0);
+
+    // Tabla simple de procesos: nombre | pid | RAM. Scroll si son muchos.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for p in &sess.processes {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&p.name).color(theme.text_primary));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(p.memory_human())
+                                .monospace()
+                                .color(theme.text_muted),
+                        );
+                        ui.add_space(16.0);
+                        ui.label(
+                            egui::RichText::new(format!("pid {}", p.pid))
+                                .monospace()
+                                .small()
+                                .color(theme.text_muted),
+                        );
+                    });
+                });
+            }
+        });
 }
 
 /// Dibuja un "chip" / pill: rect redondeado con fondo sutil + texto pequeno.
