@@ -80,6 +80,8 @@ pub const CONTAINER_WORKDIR: &str = "/work";
 /// (read-only). El resto de `/root/.claude` queda escribible para que claude
 /// guarde sesiones/cache adentro.
 pub const CONTAINER_CREDS_PATH: &str = "/root/.claude/.credentials.json";
+/// Ruta donde se monta el binario del agente (claude) dentro del contenedor.
+pub const CONTAINER_CLAUDE_PATH: &str = "/usr/local/bin/claude";
 
 /// Como lanzar una sesion managed dentro de un contenedor (Fase D).
 #[derive(Debug, Clone)]
@@ -100,6 +102,9 @@ pub struct ContainerSpec {
     pub memory: Option<String>,
     /// Limite de CPUs (ej "2"). `None` = sin limite.
     pub cpus: Option<String>,
+    /// Binario standalone de claude (Linux, arch-matched) a montar read-only en
+    /// `CONTAINER_CLAUDE_PATH`. `None` = la imagen ya trae claude (o modo nativo).
+    pub claude_binary_host: Option<PathBuf>,
     /// Comando a correr adentro (ej `["claude", "<tarea>"]`).
     pub command: Vec<String>,
 }
@@ -131,6 +136,12 @@ pub fn build_run_args(spec: &ContainerSpec) -> Vec<String> {
     if let Some(creds) = &spec.creds_host {
         args.push("-v".to_string());
         args.push(format!("{}:{}:ro", creds.display(), CONTAINER_CREDS_PATH));
+    }
+
+    // Binario del agente (claude) inyectado read-only, sin rebuild de imagen.
+    if let Some(claude) = &spec.claude_binary_host {
+        args.push("-v".to_string());
+        args.push(format!("{}:{}:ro", claude.display(), CONTAINER_CLAUDE_PATH));
     }
 
     // Puertos publicados (host -> contenedor).
@@ -243,6 +254,26 @@ pub fn detect_base_image(repo_path: &Path) -> String {
     "debian:stable-slim".to_string()
 }
 
+/// Mapea el arch del host (`std::env::consts::ARCH`) al "platform" de Docker.
+/// Los contenedores corren el arch del host: amd64 en Win/Linux x86, arm64 en
+/// Apple Silicon (corrección al supuesto "siempre x86_64").
+pub fn arch_to_docker_platform(host_arch: &str) -> &'static str {
+    match host_arch {
+        "aarch64" => "arm64",
+        // x86_64 y cualquier otro caen a amd64 (default seguro en Win/Linux x86).
+        _ => "amd64",
+    }
+}
+
+/// Ruta del binario de claude para Linux cacheado por michi, según el arch del
+/// host (ej `<bin_dir>/claude-linux-amd64`).
+pub fn claude_binary_path(bin_dir: &Path, host_arch: &str) -> PathBuf {
+    bin_dir.join(format!(
+        "claude-linux-{}",
+        arch_to_docker_platform(host_arch)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +341,7 @@ mod tests {
             )],
             memory: Some("4g".to_string()),
             cpus: Some("2".to_string()),
+            claude_binary_host: Some(PathBuf::from("/host/.michi/bin/claude-linux-amd64")),
             command: vec!["claude".to_string(), "arregla el bug".to_string()],
         }
     }
@@ -498,5 +530,43 @@ mod tests {
         touch(tmp.path(), "Cargo.toml");
         touch(tmp.path(), "package.json");
         assert_eq!(detect_base_image(tmp.path()), "rust:slim");
+    }
+
+    #[test]
+    fn arch_maps_to_docker_platform() {
+        assert_eq!(arch_to_docker_platform("x86_64"), "amd64");
+        assert_eq!(arch_to_docker_platform("aarch64"), "arm64");
+        assert_eq!(arch_to_docker_platform("mips"), "amd64");
+    }
+
+    #[test]
+    fn claude_binary_path_uses_arch_suffix() {
+        assert_eq!(
+            claude_binary_path(Path::new("/m/bin"), "aarch64"),
+            PathBuf::from("/m/bin/claude-linux-arm64")
+        );
+        assert_eq!(
+            claude_binary_path(Path::new("/m/bin"), "x86_64"),
+            PathBuf::from("/m/bin/claude-linux-amd64")
+        );
+    }
+
+    #[test]
+    fn run_args_mount_claude_binary_read_only() {
+        let a = build_run_args(&sample_spec());
+        let expected = format!(
+            "{}:{}:ro",
+            PathBuf::from("/host/.michi/bin/claude-linux-amd64").display(),
+            CONTAINER_CLAUDE_PATH
+        );
+        assert!(a.contains(&expected), "args: {a:?}");
+    }
+
+    #[test]
+    fn run_args_omit_claude_binary_when_none() {
+        let mut spec = sample_spec();
+        spec.claude_binary_host = None;
+        let a = build_run_args(&spec);
+        assert!(!a.iter().any(|x| x.contains(CONTAINER_CLAUDE_PATH)));
     }
 }
