@@ -1,0 +1,16 @@
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

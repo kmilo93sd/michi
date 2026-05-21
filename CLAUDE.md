@@ -5,16 +5,29 @@
 
 ## Qué es michi
 
-**AI-native development environment** para orquestar múltiples instancias de
-Claude Code en paralelo, cada una en su propio `git worktree` aislado.
+**Harness multi-agente** para correr varias sesiones de Claude Code en paralelo
+en una misma máquina sin que se pisen: michi **observa** cada sesión, muestra qué
+hace y qué recursos consume, y **aísla** esos recursos (git worktree, puertos,
+base de datos, contenedores) por sesión.
 
-No es un IDE: michi no edita código, Claude lo hace. michi es el panel de
-control que corre muchos Claude Codes simultáneamente sin que se pisen entre
-ellos en git. La categoría correcta es **AI agent orchestrator** —
-emparentado con Devin, Replit Agent y Cline, distinto de Cursor/Windsurf
-(esos son IDEs con AI asistente; acá el agente es el actor principal).
+No es un IDE ni un orquestador cloud. michi no edita código, Claude lo hace.
+michi es la **torre de control de tráfico**: corre nativo en tu máquina
+(Rust + egui, sin Electron, sin webview), no en un servidor. La terminología
+real es **harness / agent orchestration** — sin etiquetas marketineras.
 
-Estado: alpha · POC en desarrollo activo. Cross-platform desde día 1
+**Dos tipos de sesión:**
+- **Managed** — la lanzó michi, tiene PTY embebido y control total (inyectar
+  prompts, asignar puertos, aislar su DB, sandboxearla en contenedor).
+- **Detectada** — corre fuera de michi (tu terminal, VS Code). michi la VE
+  escaneando el host, read-only, hasta que la "traés".
+
+**Dirección V1 (decisión 2026-05-21): container-first.** Las sesiones que michi
+lanza van en un sandbox de contenedor cuando hay Docker, con **fallback nativo**
+si no (Docker preferido, no requerido — ver regla 4). Detalle completo en
+[specs/.../SPEC.md](./specs/20260517-1716-michi-poc/SPEC.md) sección "Estado
+actual (2026-05-21)".
+
+Estado: alpha · desarrollo activo. Cross-platform desde día 1
 (Windows / macOS / Linux).
 
 ## Reglas obligatorias
@@ -86,24 +99,37 @@ tokens, patterns y gotchas conocidos de egui 0.34.
 
 ```
 src/
-├── lib.rs            -- public API del crate (re-exporta los modulos)
-├── main.rs           -- binary entry (thin wrapper sobre lib)
-├── app.rs            -- struct App + eframe::App impl
-├── theme.rs          -- tokens visuales + serde a TOML
+├── lib.rs              -- public API del crate (re-exporta los modulos)
+├── main.rs             -- binary entry (thin wrapper sobre lib)
+├── app.rs              -- struct App + eframe::App impl
+├── theme.rs            -- tokens visuales + serde a TOML
 ├── state/
-│   ├── job.rs        -- struct Job + JobStatus
-│   ├── workspace.rs  -- struct Workspace + Repo + discovery
-│   └── persistence.rs -- AppState + load/save state.json
+│   ├── job.rs          -- struct Job + JobStatus
+│   ├── workspace.rs    -- struct Workspace + Repo + discovery
+│   └── persistence.rs  -- AppState + load/save state.json
 ├── git/
-│   ├── worktree.rs   -- create / remove / list (shell out a git)
-│   └── status.rs     -- count_changed_files
+│   ├── worktree.rs     -- create / remove / list (shell out a git)
+│   └── status.rs       -- count_changed_files
+├── terminal/           -- egui_term + portable-pty (PTY de sesiones managed)
 ├── ui/
 │   └── new_job_modal.rs -- modal "Nuevo trabajo"
-├── terminal/         -- (Fase 4) egui_term integration
-├── worker.rs         -- spawn_create_worktree, spawn_remove_worktree,
-│                        spawn_status_poller (todos via std::thread + mpsc)
+├── claude_sessions.rs  -- detecta TODAS las sesiones claude del host
+│                          (managed + externas), estado real, titulo, agrupa por cwd
+├── claude_config.rs    -- inventario de skills/agents/MCPs por scope
+│                          (global/workspace/repo) para los totales del sidebar
+├── resource_monitor.rs -- arbol de procesos por sesion (sysinfo), RAM, classify
+├── port_detector.rs    -- detecta PORT_* en .env del repo/worktree
+├── port_alloc.rs       -- asigna rangos de puerto por sesion, inyecta env vars
+├── system.rs           -- helpers de OS (abrir carpeta en el file manager nativo)
+├── workspace_prep.rs   -- detecta/prepara workspaces "pelados" (scaffolding
+│                          CLAUDE.md/.claude/specs + git init opcional)
+├── worker.rs           -- threads + mpsc (create/remove worktree, status poller)
 └── tests embebidos en cada archivo con #[cfg(test)] mod tests { ... }
 ```
+
+> Roadmap V1 agrega modulos para: DB isolation (postgres compartido + DB por
+> sesion), sandbox en contenedor (lifecycle Docker), e inyeccion de prompts a
+> sesiones managed. Ver `specs/20260517-1716-michi-poc/PHASES.md`.
 
 Decisión arquitectónica: `lib + bin split`. La lib expone API pública;
 `main.rs` es delgado. Esto asegura que cada `pub fn` esté cubierto por
@@ -169,5 +195,6 @@ Adicionales:
 - [README.md](./README.md) — overview público
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — setup dev, code style, PR flow
 - [DESIGN_SYSTEM.md](./DESIGN_SYSTEM.md) — tokens, patterns y gotchas UI
-- [Spec original](https://github.com/kmilo93sd/lelemon-workspace/tree/master/specs/20260517-1716-michi-poc)
-  (privado) — fases del POC, decisiones de diseño
+- [Spec del POC](./specs/20260517-1716-michi-poc/SPEC.md) — problema, propuesta,
+  goals, decisiones de diseño. Ver también `SESSION.md` (contexto para retomar),
+  `PHASES.md`, `UI_DESIGN.md` y `RUST_GUIDELINES.md` en esa misma carpeta.
