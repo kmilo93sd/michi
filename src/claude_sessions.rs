@@ -148,7 +148,8 @@ pub fn extract_resume_id(cmd: &[String]) -> Option<String> {
 /// Para cada una agrega los recursos de su arbol de descendientes y lee el
 /// estado real desde `~/.claude/sessions/<pid>.json`.
 pub fn detect_sessions(all: &[ProcInfo]) -> Vec<DetectedSession> {
-    all.iter()
+    let mut sessions: Vec<DetectedSession> = all
+        .iter()
         .filter(|p| is_claude_cli(&p.name, &p.cmd))
         .map(|p| {
             let subtree = resource_monitor::collect_subtree(all, p.pid);
@@ -164,7 +165,12 @@ pub fn detect_sessions(all: &[ProcInfo]) -> Vec<DetectedSession> {
                 status,
             }
         })
-        .collect()
+        .collect();
+    // Orden estable por PID: sysinfo devuelve los procesos en orden
+    // arbitrario entre snapshots, lo que hacia que las cards saltaran de
+    // posicion en cada poll. El PID es estable durante la vida de la sesion.
+    sessions.sort_by_key(|s| s.pid);
+    sessions
 }
 
 /// `true` si el `cwd` de una sesion detectada cae dentro (o es igual a)
@@ -376,6 +382,38 @@ mod tests {
         let found = detect_sessions(&all);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].resources.process_count, 2, "claude + node hijo");
+    }
+
+    #[test]
+    fn detect_sessions_returns_stable_order_by_pid() {
+        // Aunque los procesos vengan desordenados, la salida es por PID
+        // ascendente — asi las cards no saltan entre polls.
+        let all = vec![
+            proc(
+                300,
+                None,
+                "claude.exe",
+                &["C:\\x\\.local\\bin\\claude.exe"],
+                Some("/a"),
+            ),
+            proc(
+                100,
+                None,
+                "claude.exe",
+                &["C:\\x\\.local\\bin\\claude.exe"],
+                Some("/b"),
+            ),
+            proc(
+                200,
+                None,
+                "claude.exe",
+                &["C:\\x\\.local\\bin\\claude.exe"],
+                Some("/c"),
+            ),
+        ];
+        let found = detect_sessions(&all);
+        let pids: Vec<u32> = found.iter().map(|s| s.pid).collect();
+        assert_eq!(pids, vec![100, 200, 300]);
     }
 
     #[test]
