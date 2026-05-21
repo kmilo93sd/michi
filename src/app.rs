@@ -8,12 +8,13 @@ use tracing::{debug, warn};
 
 use crate::claude_config::{self, ClaudeInventory};
 use crate::claude_sessions;
+use crate::docker;
 use crate::port_alloc;
 use crate::port_detector;
 use crate::resource_monitor;
 use crate::state::{self, AppState, Job, JobStatus, Workspace};
 use crate::system;
-use crate::terminal::{self, JobTerminal};
+use crate::terminal::JobTerminal;
 use crate::theme::Theme;
 use crate::ui::new_job_modal::{self, ModalAction, NewJobModalState};
 use crate::worker::{
@@ -74,6 +75,14 @@ pub struct App {
     /// PID de la sesion DETECTADA seleccionada (para mostrar su panel de
     /// detalle). Mutuamente excluyente con `selected_job_id`.
     selected_detected_pid: Option<u32>,
+    /// Estado de Docker, detectado al boot. Decide contenedor vs nativo al
+    /// lanzar un job (regla 4: contenedor preferido, nativo de fallback).
+    docker_status: docker::DockerStatus,
+    /// Dir donde michi cachea el binario de claude para Linux (`~/.michi/bin`).
+    claude_bin_dir: std::path::PathBuf,
+    /// Si ya se disparo la adquisicion (en background) del binario de claude,
+    /// para no lanzarla mas de una vez.
+    claude_acquire_started: bool,
 }
 
 /// El usuario hizo click en ▶ de un workspace o repo. Mostrar dialogo
@@ -174,6 +183,11 @@ impl App {
             detected_sessions: Vec::new(),
             session_titles: HashMap::new(),
             selected_detected_pid: None,
+            docker_status: docker::detect_docker(),
+            claude_bin_dir: dirs::home_dir()
+                .map(|h| h.join(".michi").join("bin"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".michi/bin")),
+            claude_acquire_started: false,
         };
         app.push_status_targets();
         app
@@ -249,14 +263,16 @@ impl App {
             let backend_id = self.next_backend_id;
             self.next_backend_id += 1;
             let env = self.env_for_job(&job);
+            let plan = self.build_launch_plan(&job, &env);
+            debug!("job {job_id}: lanzando en modo {:?}", plan.mode);
             match JobTerminal::spawn(
                 backend_id,
                 ctx.clone(),
                 self.pty_tx.clone(),
-                &terminal::default_shell(),
-                vec![],
-                &env,
-                &job.worktree_path,
+                &plan.command,
+                plan.args.clone(),
+                &plan.env,
+                &plan.working_directory,
             ) {
                 Ok(t) => {
                     self.terminals.insert(job_id.to_string(), t);
@@ -292,6 +308,56 @@ impl App {
             env.insert(slot.env_var.clone(), port.to_string());
         }
         env
+    }
+
+    /// Decide y arma el plan de lanzamiento del job: contenedor (si hay Docker
+    /// y el binario de claude cacheado) o nativo (fallback). La primera vez que
+    /// hace falta el binario y no esta, dispara su adquisicion en background;
+    /// esa sesion sale nativa y las proximas van en contenedor.
+    fn build_launch_plan(
+        &mut self,
+        job: &Job,
+        env: &BTreeMap<String, String>,
+    ) -> docker::LaunchPlan {
+        let host_arch = std::env::consts::ARCH;
+        let claude_bin = docker::claude_binary_path(&self.claude_bin_dir, host_arch);
+        let claude_ready = claude_bin.is_file();
+
+        if self.docker_status.is_available() && !claude_ready && !self.claude_acquire_started {
+            self.claude_acquire_started = true;
+            let bin_dir = self.claude_bin_dir.clone();
+            let arch = host_arch.to_string();
+            std::thread::spawn(move || {
+                if let Err(e) = docker::ensure_claude_binary(&bin_dir, &arch) {
+                    warn!("no se pudo adquirir el binario de claude: {e:#}");
+                }
+            });
+        }
+
+        // Cada slot de puerto asignado se publica host->contenedor con el mismo
+        // numero (cada contenedor tiene su red, asi que no chocan entre sesiones).
+        let ports: Vec<(u16, u16)> = env
+            .values()
+            .filter_map(|v| v.parse::<u16>().ok())
+            .map(|p| (p, p))
+            .collect();
+        let creds_host = dirs::home_dir()
+            .map(|h| h.join(".claude").join(".credentials.json"))
+            .filter(|p| p.is_file());
+
+        let spec = docker::ContainerSpec {
+            name: format!("michi-{}", job.id),
+            image: docker::detect_base_image(&job.worktree_path),
+            worktree_host: job.worktree_path.clone(),
+            creds_host,
+            ports,
+            env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            memory: Some("4g".to_string()),
+            cpus: Some("2".to_string()),
+            claude_binary_host: claude_ready.then_some(claude_bin),
+            command: docker::build_session_command(None),
+        };
+        docker::plan_launch(&self.docker_status, &spec)
     }
 
     /// Modal "¿Sesion directa o nuevo worktree?". Soporta dos modos:
