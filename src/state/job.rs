@@ -97,6 +97,24 @@ impl Job {
         }
     }
 
+    /// Construye un `Job` para una sesion EXTERNA "traida a michi": se retoma
+    /// con `claude --resume <id>` en el mismo cwd donde corria. Como no crea un
+    /// worktree nuevo (reusa el cwd existente), se marca in-place con la branch
+    /// `(traida)` para que el close flow no llame a `git worktree remove`.
+    pub fn for_brought_session(workspace: &str, repo: &str, cwd: &Path) -> Self {
+        Self {
+            id: format!("job-{}", Uuid::new_v4()),
+            workspace: workspace.to_string(),
+            repo: repo.to_string(),
+            branch: "(traida)".into(),
+            worktree_path: cwd.to_path_buf(),
+            status: JobStatus::Idle,
+            files_changed: 0,
+            last_activity: SystemTime::now(),
+            port_range_start: 0,
+        }
+    }
+
     pub fn mock_set() -> Vec<Job> {
         let now = SystemTime::now();
         vec![
@@ -161,7 +179,7 @@ impl Job {
     /// `git worktree remove`). Se detecta por la convencion de marcar la
     /// branch con un nombre entre parentesis.
     pub fn is_in_place_session(&self) -> bool {
-        self.branch == "(directo)" || self.branch == "(workspace)"
+        self.branch == "(directo)" || self.branch == "(workspace)" || self.branch == "(traida)"
     }
 
     pub fn subtitle(&self) -> String {
@@ -413,6 +431,19 @@ mod tests {
         let workspace = Job::for_workspace_session("ws", &PathBuf::from("/w"));
         assert!(direct.is_in_place_session());
         assert!(workspace.is_in_place_session());
+    }
+
+    #[test]
+    fn for_brought_session_is_in_place_and_uses_cwd() {
+        let cwd = PathBuf::from("/proj/repo");
+        let job = Job::for_brought_session("ws", "repo", &cwd);
+        assert_eq!(job.worktree_path, cwd);
+        assert_eq!(job.branch, "(traida)");
+        assert!(
+            job.is_in_place_session(),
+            "una sesion traida no tiene worktree propio"
+        );
+        assert!(job.id.starts_with("job-"));
     }
 
     #[test]

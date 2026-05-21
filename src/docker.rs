@@ -308,6 +308,17 @@ pub fn build_session_command(initial_task: Option<&str>) -> Vec<String> {
     }
 }
 
+/// Comando para retomar una sesion existente en el PTY: `claude --resume <id>`.
+/// El historial se lee de `~/.claude` del host; por eso las sesiones traidas
+/// corren nativas (en contenedor ese dir no esta montado).
+pub fn build_resume_command(session_id: &str) -> Vec<String> {
+    vec![
+        "claude".to_string(),
+        "--resume".to_string(),
+        session_id.to_string(),
+    ]
+}
+
 /// Garantiza que el binario de claude para Linux esté cacheado en `bin_dir`.
 /// Si ya existe, lo devuelve; si no, lo extrae con `docker` (lento la 1a vez).
 pub fn ensure_claude_binary(bin_dir: &Path, host_arch: &str) -> Result<PathBuf> {
@@ -668,6 +679,18 @@ mod tests {
         assert_eq!(
             build_session_command(Some("arregla el CORS")),
             vec!["claude".to_string(), "arregla el CORS".to_string()]
+        );
+    }
+
+    #[test]
+    fn resume_command_passes_session_id() {
+        assert_eq!(
+            build_resume_command("abc-123"),
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "abc-123".to_string()
+            ]
         );
     }
 
