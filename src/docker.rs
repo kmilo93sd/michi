@@ -207,7 +207,9 @@ pub struct LaunchPlan {
 /// nativa (worktree + comando directo) como fallback. Implementa la
 /// degradacion de la regla 4 (Docker preferido, no requerido). Funcion pura.
 pub fn plan_launch(docker: &DockerStatus, spec: &ContainerSpec) -> LaunchPlan {
-    if docker.is_available() {
+    // Contenedor solo si hay Docker Y un binario de claude para montar; si no,
+    // el contenedor no tendria agente → fallback nativo.
+    if docker.is_available() && spec.claude_binary_host.is_some() {
         LaunchPlan {
             mode: LaunchMode::Container,
             command: "docker".to_string(),
@@ -542,6 +544,17 @@ mod tests {
         let plan = plan_launch(&docker, &spec);
         assert_eq!(plan.command, "claude");
         assert!(plan.args.is_empty());
+    }
+
+    #[test]
+    fn plan_native_when_docker_up_but_no_claude_binary() {
+        // Sin binario para montar, un contenedor no tendria claude → nativo.
+        let mut spec = sample_spec();
+        spec.claude_binary_host = None;
+        let docker = DockerStatus::Available {
+            server_version: "27".into(),
+        };
+        assert_eq!(plan_launch(&docker, &spec).mode, LaunchMode::Native);
     }
 
     fn touch(dir: &Path, name: &str) {
