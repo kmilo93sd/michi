@@ -1,0 +1,25 @@
+[package]
+name = "michi"
+version = "0.1.0"
+edition = "2024"
+authors = ["Camilo Alaniz <kmilo93sd@gmail.com>"]
+description = "Panel de control para gestionar Claude Codes paralelos en worktrees"
+license = "MIT"
+publish = false
+
+# IMPORTANTE: las [dependencies] de abajo se llenan con `cargo add` al bootstrap.
+# No hardcodear versiones acá — cargo siempre debe agarrar la última estable
+# desde crates.io. Este archivo es solo el skeleton de metadata.
+#
+# Ver bootstrap.sh para los `cargo add` exactos.
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1  # build más rápido pero ejecutables usables
