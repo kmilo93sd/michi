@@ -47,6 +47,11 @@ pub struct App {
     close_confirm: Option<CloseConfirm>,
     /// Confirmacion pendiente para matar una sesion detectada (externa).
     detected_close_confirm: Option<DetectedCloseConfirm>,
+    /// Confirmacion pendiente para "traer a michi" una sesion externa.
+    bring_confirm: Option<BringConfirm>,
+    /// session_id de Claude por job-id, para sesiones traidas (resume). En
+    /// memoria (v1, no persistido): tras reiniciar michi se relanza fresh.
+    brought_resume: HashMap<String, String>,
     /// Pendiente de eleccion: el usuario hizo click en ▶ de un repo y debe
     /// decidir si abrir sesion directa o worktree nuevo.
     start_choice: Option<StartChoice>,
@@ -125,6 +130,18 @@ struct DetectedCloseConfirm {
     tree_pids: Vec<u32>,
 }
 
+/// Confirmacion para "traer a michi" una sesion externa: cierra la externa y
+/// la reabre con `claude --resume` adentro de michi.
+struct BringConfirm {
+    pid: u32,
+    session_id: String,
+    cwd: std::path::PathBuf,
+    label: String,
+    tree_pids: Vec<u32>,
+    proc_count: usize,
+    has_docker: bool,
+}
+
 enum StartChoiceAction {
     Direct,
     Worktree,
@@ -161,6 +178,7 @@ enum JobMenu {
 #[derive(Clone, Copy)]
 enum DetectedMenu {
     OpenFolder,
+    Bring,
     Close,
 }
 
@@ -190,6 +208,8 @@ impl App {
             dirty_since: None,
             close_confirm: None,
             detected_close_confirm: None,
+            bring_confirm: None,
+            brought_resume: HashMap::new(),
             start_choice: None,
             terminals: HashMap::new(),
             pty_tx,
@@ -341,7 +361,15 @@ impl App {
         let claude_bin = docker::claude_binary_path(&self.claude_bin_dir, host_arch);
         let claude_ready = claude_bin.is_file();
 
-        if self.docker_status.is_available() && !claude_ready && !self.claude_acquire_started {
+        // Sesiones "traidas" se retoman con `claude --resume`. El historial vive
+        // en ~/.claude del host (no montado en contenedor) -> corren nativas.
+        let resume = self.brought_resume.get(&job.id).cloned();
+
+        if resume.is_none()
+            && self.docker_status.is_available()
+            && !claude_ready
+            && !self.claude_acquire_started
+        {
             self.claude_acquire_started = true;
             let bin_dir = self.claude_bin_dir.clone();
             let arch = host_arch.to_string();
@@ -372,8 +400,17 @@ impl App {
             env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             memory: Some("4g".to_string()),
             cpus: Some("2".to_string()),
-            claude_binary_host: claude_ready.then_some(claude_bin),
-            command: docker::build_session_command(None),
+            // En resume forzamos nativo (binario None) porque el contenedor no
+            // tiene montado el historial de ~/.claude.
+            claude_binary_host: if resume.is_some() {
+                None
+            } else {
+                claude_ready.then_some(claude_bin)
+            },
+            command: match &resume {
+                Some(sid) => docker::build_resume_command(sid),
+                None => docker::build_session_command(None),
+            },
         };
         docker::plan_launch(&self.docker_status, &spec)
     }
@@ -748,6 +785,34 @@ impl App {
                     self.last_error = Some(format!("no se pudo abrir la carpeta: {e:#}"));
                 }
             }
+            DetectedMenu::Bring => {
+                let Some(session_id) = sess.session_id.clone() else {
+                    self.last_error =
+                        Some("no se pudo leer el id de la sesion para traerla".into());
+                    return;
+                };
+                let Some(cwd) = sess.cwd.clone() else {
+                    self.last_error =
+                        Some("la sesion no expone su carpeta; no se puede traer".into());
+                    return;
+                };
+                let label = sess
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| format!("pid {}", sess.pid));
+                let tree_pids: Vec<u32> = sess.processes.iter().map(|p| p.pid).collect();
+                let proc_count = tree_pids.len();
+                let has_docker = sess.breakdown.has_docker;
+                self.bring_confirm = Some(BringConfirm {
+                    pid,
+                    session_id,
+                    cwd,
+                    label,
+                    tree_pids,
+                    proc_count,
+                    has_docker,
+                });
+            }
             DetectedMenu::Close => {
                 let label = sess
                     .title
@@ -761,6 +826,40 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Procesa "traer a michi": cierra la sesion externa y crea un job managed
+    /// que la retoma con `claude --resume` en su mismo cwd.
+    fn bring_session(&mut self, c: BringConfirm) {
+        if let Err(e) = system::kill_session(c.pid, &c.tree_pids) {
+            self.last_error = Some(format!("no se pudo cerrar la sesion externa: {e:#}"));
+            return;
+        }
+        let ws_name = self.workspace_name_for_cwd(&c.cwd);
+        let repo = c
+            .cwd
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "repo".into());
+        let job = Job::for_brought_session(&ws_name, &repo, &c.cwd);
+        let job_id = job.id.clone();
+        self.brought_resume.insert(job_id.clone(), c.session_id);
+        self.jobs.push(job);
+        self.selected_job_id = Some(job_id);
+        self.selected_detected_pid = None;
+        self.last_info = Some(format!("\"{}\" traida a michi.", c.label));
+        self.last_error = None;
+        self.mark_dirty();
+        self.push_status_targets();
+    }
+
+    /// Nombre del workspace cuyo path contiene `cwd`, o `(externa)` si ninguno.
+    fn workspace_name_for_cwd(&self, cwd: &std::path::Path) -> String {
+        self.workspaces
+            .iter()
+            .find(|w| cwd.starts_with(&w.path))
+            .map(|w| w.name.clone())
+            .unwrap_or_else(|| "(externa)".to_string())
     }
 
     /// Modal de confirmacion para matar una sesion detectada (destructivo).
@@ -840,6 +939,91 @@ impl App {
             }
             Some(CloseConfirmAction::Cancel) => {
                 self.detected_close_confirm = None;
+            }
+            None => {}
+        }
+    }
+
+    /// Modal de confirmacion para "traer a michi" una sesion externa.
+    fn render_bring_confirm(&mut self, ctx: &egui::Context) {
+        let Some(confirm) = self.bring_confirm.as_ref() else {
+            return;
+        };
+        let theme = &self.theme;
+        let frame = egui::Frame::new()
+            .fill(theme.bg_surface)
+            .inner_margin(egui::Margin::same(20))
+            .corner_radius(egui::CornerRadius::same(8))
+            .stroke(egui::Stroke::new(1.0, theme.border));
+
+        let label = confirm.label.clone();
+        let proc_count = confirm.proc_count;
+        let has_docker = confirm.has_docker;
+        let mut action: Option<CloseConfirmAction> = None;
+        let modal_response = egui::Modal::new(egui::Id::new("bring_confirm_modal"))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_min_width(380.0);
+                ui.set_max_width(540.0);
+                ui.heading("Traer a michi");
+                ui.add_space(12.0);
+                ui.label(format!(
+                    "Reabrimos \"{label}\" adentro de michi con su historial (resume)."
+                ));
+                ui.add_space(6.0);
+                let warn = if has_docker {
+                    format!(
+                        "Se cierra la sesion externa ({proc_count} procesos, incluye docker). \
+                         Los procesos hijos vivos (dev servers, containers) se pierden; el \
+                         historial NO."
+                    )
+                } else {
+                    format!(
+                        "Se cierra la sesion externa ({proc_count} procesos). Los procesos \
+                         hijos vivos se pierden; el historial NO."
+                    )
+                };
+                ui.label(
+                    egui::RichText::new(warn)
+                        .small()
+                        .color(theme.status_needs_attention),
+                );
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("Traer a michi")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            action = Some(CloseConfirmAction::Force);
+                        }
+                        ui.add_space(8.0);
+                        if ui
+                            .button("Cancelar")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            action = Some(CloseConfirmAction::Cancel);
+                        }
+                    });
+                });
+            });
+
+        if modal_response.backdrop_response.clicked() {
+            action = Some(CloseConfirmAction::Cancel);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            action = Some(CloseConfirmAction::Cancel);
+        }
+
+        match action {
+            Some(CloseConfirmAction::Force) => {
+                let c = self.bring_confirm.take().expect("checked above");
+                self.bring_session(c);
+            }
+            Some(CloseConfirmAction::Cancel) => {
+                self.bring_confirm = None;
             }
             None => {}
         }
@@ -1184,6 +1368,7 @@ impl eframe::App for App {
 
         self.render_close_confirm(ui.ctx());
         self.render_detected_close_confirm(ui.ctx());
+        self.render_bring_confirm(ui.ctx());
         self.render_start_choice(ui.ctx());
 
         if self.new_job_modal_open {
@@ -2086,6 +2271,18 @@ fn render_detected_card(
 
     let mut menu_pick: Option<DetectedMenu> = None;
     response.context_menu(|ui| {
+        if ui
+            .button(egui::RichText::new("Traer a michi").color(theme.accent))
+            .on_hover_text(
+                "Cierra la sesion externa y la reabre adentro de michi (resume).\n\
+                 El historial se mantiene; se pierden los procesos hijos vivos.",
+            )
+            .clicked()
+        {
+            menu_pick = Some(DetectedMenu::Bring);
+            ui.close_kind(egui::UiKind::Menu);
+        }
+        ui.separator();
         if ui.button("Abrir carpeta").clicked() {
             menu_pick = Some(DetectedMenu::OpenFolder);
             ui.close_kind(egui::UiKind::Menu);
