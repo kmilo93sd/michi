@@ -10,6 +10,7 @@ pub mod claude_config;
 pub mod git;
 pub mod port_alloc;
 pub mod port_detector;
+pub mod resource_monitor;
 pub mod state;
 pub mod system;
 pub mod terminal;
