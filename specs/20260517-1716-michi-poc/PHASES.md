@@ -89,7 +89,13 @@ que lo resuelva con un click.
 - [ ] C.1 - Detectar uso de `DATABASE_URL` en el proyecto (`.env` / compose).
 - [ ] C.2 - Postgres compartido: detectar contenedor existente o levantar uno.
 - [ ] C.3 - Crear DB/schema efímero por sesión; inyectar `DATABASE_URL` por sesión.
+  Migraciones las corre Claude/el dev server, NUNCA michi (solo provee el tubo).
 - [ ] C.4 - Drop de la DB/schema al cerrar la sesión.
+- [ ] C.5 - Redis: contenedor efímero **por sesión** (no multi-tenant — DB 0-15
+  globales, `FLUSHALL` peligroso; pesa ~10MiB).
+- [ ] C.6 - GC de huérfanos al arranque: tokio task que dropea DBs `session_*` y
+  contenedores `michi-*` sin sesión activa (anti-crash). Funciona en nativo y
+  contenedor (DB isolation es ortogonal al sandbox → puede ir primero en nativo).
 
 **Criterio:** dos sesiones del mismo repo corren tests contra la misma instancia
 postgres sin colisión (cada una en su DB); al cerrar, se limpia.
@@ -123,16 +129,25 @@ Arquitectura confirmada (ver SPEC.md §4): **3 capas** (runtime del repo / agent
 michi / infra michi) sobre el **estándar devcontainer**. El wiring va por cuts:
 
 - [ ] D.3 (Cut-1) - **Wiring real**: llamar `plan_launch` al crear job → pasar el
-  `LaunchPlan` a `JobTerminal::spawn`. Incluye base universal configurable, capa
-  claude (instalador standalone), caches en named volumes, activación
-  default-inteligente + toggle override en el modal, y badge Container/Native en la
-  card. (Inyecta de paso la tarea inicial como primer prompt.)
+  `LaunchPlan` a `JobTerminal::spawn`. Técnicas confirmadas post-Gemini (ver SPEC.md
+  §5):
+  - Imagen **slim por lenguaje** detectada (`Cargo.toml`→rust, `package.json`→node,
+    fallback `debian:slim`), imágenes oficiales stock.
+  - Capa agente por **bind-mount del binario** claude-linux (arch-matched x64/arm64)
+    desde `~/.michi/bin/`, no por imagen derivada.
+  - **Split-anatomy:** fuente en bind mount de Windows, build/caché en named volumes.
+  - Activación default-inteligente + toggle override; **badge sin emoji** (dot+texto).
+  - **PTY resize:** reenviar el resize de `egui_term` al `docker run -it`.
+  - Inyecta de paso la tarea inicial como primer prompt.
 - [ ] D.4 (Cut-2) - Leer `devcontainer.json` del repo si existe (respeta el estándar).
 - [ ] D.5 (Cut-3) - Scaffolding: michi genera un `devcontainer.json` para repos sin él.
 - [ ] D.6 - Lifecycle: build/start/stop/destroy + cache de imagen derivada (base +
   capa agente) para no romper "create en <5s".
 - [ ] D.7 - Puertos: published ports (`-p host:8080`) = URL estable por sesión
   (spike ✅, sin reverse proxy en V1).
+- [ ] D.8 - Serializar mutaciones git de michi: cola mpsc por repo
+  (`HashMap<git_dir, Sender<GitJob>>`) + `git config gc.auto 0` por worktree.
+  Read-only fuera de la cola. (Corrige el blind spot de Gemini sin mutex global.)
 
 **Criterio:** crear un trabajo levanta su contenedor, `claude` corre adentro, el
 dev server queda accesible por una URL/puerto estable, y cerrar el trabajo

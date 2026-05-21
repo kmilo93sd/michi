@@ -95,6 +95,16 @@ Get-Content "$env:USERPROFILE\.michi\logs\michi.log" -Wait -Tail 50
 
 ## Notas de Sesiones Anteriores
 
+### Sesión 2026-05-21 (cont.) — spike, código D.1/D.2 y visión de Gemini
+
+**Construido (4 PRs en main):** #34 (pivote + D.1 detección de Docker), #35 (D.2 `build_run_args`), #36 (D.2 `plan_launch` planner contenedor-vs-nativo), #37 (arquitectura 3 capas + brief Gemini). Toda la lógica pura de Fase D testeada (TDD). Falta el wiring (Cut-1).
+
+**Spike D.0 hecho** (todo verde): auth portable, edit round-trip, DB isolation (1 pg=42MiB), caps OOM, puertos published, pared #1 (bind mount ~12x).
+
+**Visión de Gemini incorporada (ver SPEC.md §5).** Adoptado: bind-mount del binario claude (0ms build), slim por lenguaje (no base universal 10GB), split-anatomy (fuente en Win, build/caché en volumes), redis efímero por sesión, GC de huérfanos al arranque, override del `DATABASE_URL` si el repo trae su compose. Corregido: (1) git no comparte `index.lock` entre worktrees (cada uno tiene el suyo) → solo `gc.auto 0` + serializar mutaciones michi por cola mpsc-por-repo, sin mutex global; (2) contenedores son arm64 en Apple Silicon, no siempre x86_64 → binario claude arch-matched.
+
+**Próximo:** Cut-1 (wiring real en la UI) — o DB-isolation-nativa primero (son ortogonales, decisión de Camilo).
+
 ### Sesión 2026-05-21 (decisión container-first + alineación de docs)
 
 **Que paso:** Camilo trajo una reflexión con Gemini sobre cómo gobernar muchos agentes de código en paralelo (choques de puertos, docker duplicado, recursos). Gemini propuso un orquestador cloud genérico (Firecracker, cgroups, Btrfs CoW, Traefik, NATS). Se evaluó contra la realidad de michi (escritorio, Windows-first, cross-platform, mono-usuario): la mitad es Linux-only y rompe la regla 4. Se rescató lo que sí encaja (DB por schema, puertos/proxy, caché compartida — varias ya en el backlog del SPEC).
