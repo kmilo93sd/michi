@@ -102,9 +102,21 @@ postgres sin colisión (cada una en su DB); al cerrar, se limpia.
 
 ### Fase D — Sandbox container-first (la dirección nueva) · **FOCO**
 
-> **Estado:** `EN CURSO (spike ✅ → código)`
+> **Estado:** `Cut-1 COMPLETO (#42-#50)` — el contenedor anda de punta a punta
+> (lanzar / traer / detener / reabrir / cerrar). Quedan refinamientos
+> (split-anatomy, PTY resize, persistir session_id) y los cuts 2-3.
 > **Objetivo:** las sesiones que michi lanza viven en un contenedor aislado;
 > fallback nativo si no hay Docker.
+
+**Hecho en #42-#50 (todos en main):** wiring `plan_launch`→`JobTerminal::spawn`
+(ON por defecto); imagen slim por lenguaje; **bind-mount del binario claude**
+(arch-matched, extraído con docker-cp a `~/.michi/bin/`); montaje de `~/.claude` +
+`~/.claude.json` RW (fix del login interactivo); `docker rm -f` antes de run (fix
+conflicto de nombre) + teardown al cerrar + **GC de huérfanos al arrancar**;
+**Traer a michi** (externa → managed via resume); **Detener/Reabrir** (resume,
+`ManagedSession`); **pantalla de fin de sesión** (resumen + Retomar/Reiniciar/
+Cerrar) como card; **badge** contenedor/nativo en el header; menú contextual de
+sesiones + relabel "trabajos"→"sesiones".
 
 - [x] D.0 - **Spike manual** — ✅ COMPLETADO (2026-05-21). Hallazgos completos en
   SESSION.md "Hallazgos del spike D.0". Validado:
@@ -128,26 +140,22 @@ postgres sin colisión (cada una en su DB); al cerrar, se limpia.
 Arquitectura confirmada (ver SPEC.md §4): **3 capas** (runtime del repo / agente
 michi / infra michi) sobre el **estándar devcontainer**. El wiring va por cuts:
 
-- [ ] D.3 (Cut-1) - **Wiring real**: llamar `plan_launch` al crear job → pasar el
-  `LaunchPlan` a `JobTerminal::spawn`. Técnicas confirmadas post-Gemini (ver SPEC.md
-  §5):
-  - Imagen **slim por lenguaje** detectada (`Cargo.toml`→rust, `package.json`→node,
-    fallback `debian:slim`), imágenes oficiales stock.
-  - Capa agente por **bind-mount del binario** claude-linux (arch-matched x64/arm64)
-    desde `~/.michi/bin/`, no por imagen derivada.
-  - **Split-anatomy:** fuente en bind mount de Windows, build/caché en named volumes.
-  - Activación default-inteligente + toggle override; **badge sin emoji** (dot+texto).
-  - **PTY resize:** reenviar el resize de `egui_term` al `docker run -it`.
-  - Inyecta de paso la tarea inicial como primer prompt.
+- [x] D.3 (Cut-1) - **Wiring real** ✅ (#42-#50). Hecho: `plan_launch`→spawn,
+  imagen slim por lenguaje, bind-mount del binario, activación ON-por-defecto +
+  **badge** contenedor/nativo en el header, montaje `~/.claude` + `~/.claude.json`.
+  **Pendiente dentro de D.3:** split-anatomy (volúmenes de caché), PTY resize
+  (SIGWINCH), inyectar la tarea inicial como primer prompt.
 - [ ] D.4 (Cut-2) - Leer `devcontainer.json` del repo si existe (respeta el estándar).
 - [ ] D.5 (Cut-3) - Scaffolding: michi genera un `devcontainer.json` para repos sin él.
-- [ ] D.6 - Lifecycle: build/start/stop/destroy + cache de imagen derivada (base +
-  capa agente) para no romper "create en <5s".
+- [ ] D.6 - Cache de imagen derivada (base + capa agente) para acercar "create en
+  <5s". (stop/destroy con `docker rm -f` + GC al arrancar YA hechos en #46.)
 - [ ] D.7 - Puertos: published ports (`-p host:8080`) = URL estable por sesión
-  (spike ✅, sin reverse proxy en V1).
+  (spike ✅; falta cablear el mapeo en el `docker run` real).
 - [ ] D.8 - Serializar mutaciones git de michi: cola mpsc por repo
   (`HashMap<git_dir, Sender<GitJob>>`) + `git config gc.auto 0` por worktree.
   Read-only fuera de la cola. (Corrige el blind spot de Gemini sin mutex global.)
+- [ ] D.9 - **Persistir** `session_id`/modo de las sesiones managed (hoy en
+  memoria en `managed`/`launch_modes`) → Detener/Reabrir sobrevive a reiniciar michi.
 
 **Criterio:** crear un trabajo levanta su contenedor, `claude` corre adentro, el
 dev server queda accesible por una URL/puerto estable, y cerrar el trabajo
@@ -174,9 +182,9 @@ destruye el contenedor. Sin Docker, michi cae al camino nativo de hoy.
 |--------|--------|
 | POC base (Fases 1-6) | ✅ Completado |
 | Tanda harness (PRs #27-#33) | ✅ Completado |
-| Fase D · Sandbox container-first | 🔄 **En curso (spike ✅ → código) — FOCO** |
-| Fase A · Piso de observación | ⏸ Pausada (soporte) |
-| Fase B · Inyección y arbitraje | ⏳ Pendiente |
+| Fase D · Sandbox container-first | 🔄 **Cut-1 ✅ (#42-#50); refinamientos D.4-D.9 pendientes** |
+| Fase A · Piso de observación (context menu / Traer a michi) | ✅ Hecho (#43-#44) |
+| Fase B · Inyección y arbitraje | ⏳ Pendiente (inyectar prompts) |
 | Fase C · DB isolation | ⏳ Pendiente |
 | Fase E · Observabilidad + dogfood | ⏳ Pendiente |
 

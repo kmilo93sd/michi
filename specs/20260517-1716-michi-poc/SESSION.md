@@ -7,7 +7,7 @@
 
 ## Estado Actual (2026-05-21)
 
-**Repo:** `github.com/kmilo93sd/michi` — ~173 tests TDD, `cargo clippy -D warnings` + `cargo fmt` limpios. Workflow: PRs atomicos directo a `main` (NO stacks largos — se rompen al squash-merge con `--delete-branch`).
+**Repo:** `github.com/kmilo93sd/michi` — ~214 tests TDD, `cargo clippy -D warnings` + `cargo fmt` limpios. Workflow: PRs atomicos directo a `main` (NO stacks largos — se rompen al squash-merge con `--delete-branch`).
 
 **PIVOTE 2026-05-20 (lo mas importante):** michi dejo de ser "orquestador de Claude Codes en worktrees" y paso a ser un **harness multi-agente: observabilidad + aislamiento de recursos por agente**. El POC original (Fases 1-6: launcher + sidebar + worktrees) esta DONE en lo esencial; el foco ahora es la VISION V1 (que el SPEC ya tenia) + la nueva direccion. Ver memoria `project_michi_direction.md` y la "Sesion 2026-05-20/21" abajo.
 
@@ -26,12 +26,13 @@
 
 **Habilitador tecnico CLAVE:** `TerminalBackend::pty_id()` de egui_term YA da el OS PID real (no hace falta forkear). Y `~/.claude/sessions/<pid>.json` da estado+sessionId+cwd. Y `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` da el historial (primer mensaje = titulo).
 
-**PROXIMA TAREA (lo que se estaba por arrancar al reiniciar):** Context menu en cards de sesion detectada con 3 acciones:
-1. **Renombrar** — alias local override del titulo, persistido por sessionId.
-2. **Cerrar sesion** — mata el proceso claude + arbol (destructivo, pide confirmacion).
-3. **Traer a michi** — cierra la externa + reabre con `claude --resume <sessionId>` en PTY embebido (managed). Historial se MANTIENE (resume lee el .jsonl); se pierden procesos hijos vivos (servicios levantados) + cache de prompt. Confirmacion que avisa el estado ("esta sesion tiene node+docker, traerla los cierra").
+**ESTADO (2026-05-21, tras #42-#50):** Cut-1 del contenedor ✅ de punta a punta + ciclo de vida completo. El context menu de sesiones detectadas (Cerrar / Traer a michi) y Detener/Reabrir/fin-de-sesión/badge están hechos. Detalle en "Sesión 2026-05-21 (cont. 3)" abajo. **Renombrar** (alias por sessionId) quedó pendiente.
 
-"Traer a michi" es el HABILITADOR de todo lo demas: una vez managed, michi puede **inyectar prompts** al PTY (`backend.process_command(Write(texto+Enter))`) → caso de uso god: michi detecta conflicto/problema → boton "arreglar con Claude" → inyecta prompt → Claude corrige.
+**Próximo (a elección de Camilo):**
+- **Persistir session_id/modo** (D.9) → Detener/Reabrir sobrevive a reiniciar michi (hoy es en memoria).
+- **Inyectar prompts a managed** — el HABILITADOR god: una vez managed, michi escribe al PTY (`backend.process_command(Write(texto+Enter))`) → caso "arreglar con Claude" (detecta problema → botón → inyecta corrección).
+- **Split-anatomy** (volúmenes de caché) para compilar rápido en contenedor.
+- **DB isolation** (Fase C) · leer `devcontainer.json` (Cut-2).
 
 ## Archivos Clave
 
@@ -94,6 +95,28 @@ Get-Content "$env:USERPROFILE\.michi\logs\michi.log" -Wait -Tail 50
 - [ ] **Cross-platform**: cuando Camilo tenga mac, validar que compile sin cambios. Setup mac: `xcode-select --install` y listo (ver SPEC.md non-goal actualizado).
 
 ## Notas de Sesiones Anteriores
+
+### Sesión 2026-05-21 (cont. 3) — Cut-1 contenedor COMPLETO + ciclo de vida + UX
+
+**Qué se hizo (PRs #42-#50, todos en main):** el track contenedor quedó funcional de punta a punta + toda la UX del ciclo de vida.
+- **#42** wiring: `build_launch_plan` → `JobTerminal::spawn` (contenedor si Docker+binario, nativo si no; ON por defecto).
+- **#43** menú contextual de sesiones detectadas (Abrir carpeta / Cerrar sesión = `system::kill_session` del árbol) + relabel "trabajos"→"sesiones" en toda la UI visible.
+- **#44** **Traer a michi**: externa → managed via resume. `Job::for_brought_session` (branch `(traida)`, in-place).
+- **#45** **fix auth**: el claude en contenedor pedía login → montar `~/.claude` (carpeta) **Y** `~/.claude.json` (archivo separado, donde vive el onboarding) read-write. + fix conflicto de nombre (`docker rm -f` antes de `run`).
+- **#46** lifecycle: bajar contenedor al cerrar (`remove_container`) + **GC de huérfanos al arrancar** (`gc_orphan_containers`).
+- **#47** **Detener/Reabrir** managed con resume. `ManagedSession { claude_session_id, started, native }` (reemplazó `brought_resume`).
+- **#48** al terminar claude NO auto-relanza: marca la sesión Paused + pantalla de fin de sesión (resumen + Retomar/Reiniciar/Cerrar). **#49** esa pantalla como **card centrada** (design system). **#50** **badge** contenedor/nativo en el header (`launch_modes`).
+
+**Hechos verificados (spikes de esta tanda):**
+- Auth en contenedor: hay que montar `~/.claude` **y** `~/.claude.json` (no solo `.credentials.json`); RW.
+- `claude --session-id <uuid>` crea con id propio; `--resume <uuid>` recupera; `--session-id` repetido da **ERROR** → hay que distinguir 1a-vez (`--session-id`) de reabrir (`--resume`) con el flag `started`.
+- Crear+resume funciona en contenedor (misma cwd `/work`, `~/.claude` montado) y nativo.
+- Binario standalone de claude (236MB, 1 archivo) corre bind-mounteado en `rust:slim`/`node:slim`/`debian` sin node. Cacheado en `~/.michi/bin/claude-linux-<arch>` (extraído con docker-cp desde debian).
+- Pared #1: bind mount Win ~12x más lento que named volume (→ split-anatomy pendiente).
+
+**Módulos:** `docker.rs` (detect_docker, detect_base_image, build_run_args, plan_launch, ensure_claude_binary, build_create/resume_command, container_name, remove_container, gc_orphan_containers, arch_to_docker_platform, claude_binary_path, parse_container_ids). App nuevos: `docker_status`, `claude_bin_dir`, `managed`, `launch_modes`, `bring_confirm`, `detected_close_confirm`.
+
+**Limitaciones v1 (= follow-ups):** `managed`/`launch_modes` EN MEMORIA (Reabrir no sobrevive a reiniciar michi; la conversación sí queda en disco) · sin split-anatomy (compilar lento) · sin PTY resize · sin inyectar prompts · sin DB isolation · containers agregan un proyecto `/work` a `~/.claude.json` (cosmético) · "Renombrar" sesión quedó pendiente.
 
 ### Sesión 2026-05-21 (cont.) — spike, código D.1/D.2 y visión de Gemini
 
