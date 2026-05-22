@@ -120,6 +120,47 @@ pub fn subtree_details(subtree: &[ProcInfo]) -> Vec<ProcDetail> {
     details
 }
 
+/// Procesos agrupados por programa: cuantos hay y cuanta RAM suman. Mucho mas
+/// util para un dev que 40 filas de `node.exe` sueltas. Ordenado por RAM desc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramGroup {
+    pub name: String,
+    pub count: usize,
+    pub memory_bytes: u64,
+}
+
+impl ProgramGroup {
+    pub fn memory_human(&self) -> String {
+        humanize_bytes(self.memory_bytes)
+    }
+}
+
+/// Agrupa los procesos por nombre, sumando RAM y contando instancias. Ordena
+/// por RAM total descendente (desempata por nombre). Funcion pura.
+pub fn group_by_program(procs: &[ProcDetail]) -> Vec<ProgramGroup> {
+    use std::collections::BTreeMap;
+    let mut by_name: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+    for p in procs {
+        let entry = by_name.entry(p.name.clone()).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += p.memory_bytes;
+    }
+    let mut groups: Vec<ProgramGroup> = by_name
+        .into_iter()
+        .map(|(name, (count, memory_bytes))| ProgramGroup {
+            name,
+            count,
+            memory_bytes,
+        })
+        .collect();
+    groups.sort_by(|a, b| {
+        b.memory_bytes
+            .cmp(&a.memory_bytes)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    groups
+}
+
 /// Desglose de los procesos "notables" del arbol de una sesion: cuantos
 /// shells abrio, que runtimes/servers levanto, y si esta usando docker.
 /// Es lo que michi muestra como chips en la card ("1 shell · node · docker").
@@ -251,6 +292,34 @@ fn humanize_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_by_program_aggregates_and_sorts_by_ram() {
+        let procs = vec![
+            ProcDetail {
+                pid: 1,
+                name: "node".into(),
+                memory_bytes: 100,
+            },
+            ProcDetail {
+                pid: 2,
+                name: "node".into(),
+                memory_bytes: 200,
+            },
+            ProcDetail {
+                pid: 3,
+                name: "chrome".into(),
+                memory_bytes: 500,
+            },
+        ];
+        let g = group_by_program(&procs);
+        assert_eq!(g.len(), 2, "node x2 + chrome x1 = 2 grupos");
+        assert_eq!(g[0].name, "chrome"); // 500 > 300
+        assert_eq!(g[0].count, 1);
+        assert_eq!(g[1].name, "node");
+        assert_eq!(g[1].count, 2);
+        assert_eq!(g[1].memory_bytes, 300);
+    }
 
     fn proc(pid: u32, parent: Option<u32>, mem: u64) -> ProcInfo {
         ProcInfo {

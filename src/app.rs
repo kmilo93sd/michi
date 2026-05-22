@@ -1427,12 +1427,15 @@ impl eframe::App for App {
         });
         let mut empty_state_action = EmptyStateAction::None;
         let mut close_clicked: Option<String> = None;
+        let mut detected_detail_action: Option<(u32, DetectedMenu)> = None;
         let has_workspaces = !self.workspaces.is_empty();
         egui::CentralPanel::default()
             .frame(self.theme.base_panel_frame())
             .show_inside(ui, |ui| {
                 if let Some(sess) = &selected_detected {
-                    render_detected_detail(ui, sess, &self.theme);
+                    if let Some(act) = render_detected_detail(ui, sess, &self.theme) {
+                        detected_detail_action = Some((sess.pid, act));
+                    }
                 } else if self.jobs.is_empty() {
                     empty_state_action = render_empty_state(ui, has_workspaces);
                 } else if let Some(id) = selected_id {
@@ -1450,6 +1453,9 @@ impl eframe::App for App {
         }
         if let Some(id) = close_clicked {
             self.request_close_job(&id);
+        }
+        if let Some((pid, act)) = detected_detail_action {
+            self.handle_detected_menu(pid, act);
         }
 
         self.render_close_confirm(ui.ctx());
@@ -2669,80 +2675,174 @@ fn render_detected_detail(
     ui: &mut egui::Ui,
     sess: &claude_sessions::DetectedSession,
     theme: &Theme,
-) {
+) -> Option<DetectedMenu> {
+    let mut action: Option<DetectedMenu> = None;
+
     ui.add_space(12.0);
-    // Titulo
     let title = sess
         .title
         .clone()
         .unwrap_or_else(|| format!("Sesion pid {}", sess.pid));
     ui.heading(title);
-    ui.add_space(4.0);
-
-    // cwd
+    ui.add_space(2.0);
     if let Some(cwd) = &sess.cwd {
         ui.label(
-            egui::RichText::new(cwd.to_string_lossy().replace('\\', "/")).color(theme.text_muted),
+            egui::RichText::new(cwd.to_string_lossy().replace('\\', "/"))
+                .small()
+                .monospace()
+                .color(theme.text_muted),
         );
     }
 
-    // Estado + badge externa + recursos agregados.
+    // Estado. Si "espera permiso" / needs-attention, lo resaltamos: te necesita.
+    ui.add_space(12.0);
+    let (dot, status_color) = claude_status_visual(sess.status, theme);
+    let attention = status_color == theme.status_needs_attention;
     ui.horizontal(|ui| {
-        let (dot, color) = claude_status_visual(sess.status, theme);
-        ui.colored_label(color, dot.to_string());
-        ui.label(sess.status.label());
-        ui.label(egui::RichText::new("\u{B7}").color(theme.text_muted));
+        ui.colored_label(status_color, dot.to_string());
+        ui.label(
+            egui::RichText::new(sess.status.label()).color(if attention {
+                status_color
+            } else {
+                theme.text_primary
+            }),
+        );
+        if attention {
+            ui.label(
+                egui::RichText::new("\u{B7} requiere tu atencion")
+                    .small()
+                    .color(status_color),
+            );
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new("externa")
+                    .small()
+                    .color(theme.text_muted),
+            )
+            .on_hover_text("Corre fuera de michi; solo monitoreo hasta traerla.");
+        });
+    });
+
+    // Recursos: RAM total grande + nº procesos + chips (shells/runtimes/docker).
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(sess.resources.memory_human())
+                .heading()
+                .color(theme.text_primary),
+        );
         ui.label(
             egui::RichText::new(format!(
-                "{} procesos \u{B7} {}",
-                sess.resources.process_count,
-                sess.resources.memory_human()
+                "RAM \u{B7} {} procesos",
+                sess.resources.process_count
             ))
             .color(theme.text_muted),
         );
-        ui.label(
-            egui::RichText::new("\u{B7} externa")
-                .small()
-                .color(theme.text_muted),
-        )
-        .on_hover_text("michi no controla el terminal de esta sesion (corre fuera).");
+    });
+    if !sess.breakdown.is_empty() {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let b = &sess.breakdown;
+            if b.shells > 0 {
+                let txt = if b.shells == 1 {
+                    "1 shell".to_string()
+                } else {
+                    format!("{} shells", b.shells)
+                };
+                render_chip(ui, &txt, theme.text_muted, theme);
+            }
+            for rt in &b.runtimes {
+                render_chip(ui, rt, theme.accent, theme);
+            }
+            if b.has_docker {
+                render_chip(ui, "docker", theme.status_needs_attention, theme);
+            }
+        });
+    }
+
+    // Acciones: actuar sobre la sesion sin salir del panel.
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                egui::Button::new(egui::RichText::new("Traer a michi").color(theme.bg_base))
+                    .fill(theme.accent),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Reabrir adentro de michi (resume); cierra la externa.")
+            .clicked()
+        {
+            action = Some(DetectedMenu::Bring);
+        }
+        ui.add_space(8.0);
+        if ui
+            .button("Abrir carpeta")
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            action = Some(DetectedMenu::OpenFolder);
+        }
+        ui.add_space(8.0);
+        if ui
+            .add(egui::Button::new(
+                egui::RichText::new("Cerrar sesion").color(theme.status_error),
+            ))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            action = Some(DetectedMenu::Close);
+        }
     });
 
-    ui.add_space(12.0);
+    ui.add_space(14.0);
     ui.separator();
     ui.add_space(8.0);
 
+    // Consumo por programa: agrupado (no 40 filas sueltas) con barra de RAM.
     ui.label(
-        egui::RichText::new("Procesos del arbol")
+        egui::RichText::new("Consumo por programa")
             .strong()
             .color(theme.text_primary),
     );
-    ui.add_space(6.0);
-
-    // Tabla simple de procesos: nombre | pid | RAM. Scroll si son muchos.
+    ui.add_space(8.0);
+    let groups = resource_monitor::group_by_program(&sess.processes);
+    let max = groups.first().map(|g| g.memory_bytes).unwrap_or(1).max(1);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for p in &sess.processes {
+            for g in &groups {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&p.name).color(theme.text_primary));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(&g.name).color(theme.text_primary));
+                    if g.count > 1 {
                         ui.label(
-                            egui::RichText::new(p.memory_human())
-                                .monospace()
+                            egui::RichText::new(format!("\u{D7}{}", g.count))
+                                .small()
                                 .color(theme.text_muted),
                         );
-                        ui.add_space(16.0);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            egui::RichText::new(format!("pid {}", p.pid))
+                            egui::RichText::new(g.memory_human())
                                 .monospace()
-                                .small()
                                 .color(theme.text_muted),
                         );
                     });
                 });
+                // Barra de RAM proporcional al grupo mas pesado.
+                let frac = g.memory_bytes as f32 / max as f32;
+                let width = ui.available_width();
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(width, 4.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, theme.border);
+                let filled =
+                    egui::Rect::from_min_size(rect.min, egui::vec2(width * frac, rect.height()));
+                ui.painter().rect_filled(filled, 2.0, theme.accent);
+                ui.add_space(8.0);
             }
         });
+
+    action
 }
 
 /// Dibuja un "chip" / pill: rect redondeado con fondo sutil + texto pequeno.
