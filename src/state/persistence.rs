@@ -5,7 +5,7 @@
 //! renombra al destino final, así un crash a mitad de write nunca deja
 //! el archivo corrupto.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -14,6 +14,19 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::state::{Job, Workspace};
+
+/// Estado persistido de una sesion managed (la que michi lanza/controla), por
+/// job-id. Permite que Detener/Reabrir sobreviva a reiniciar michi: al reabrir
+/// se usa el `claude_session_id` para `claude --resume`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedSession {
+    /// session_id de Claude (generado por michi, o el de la externa traida).
+    pub claude_session_id: String,
+    /// Si ya se lanzo (1a vez se crea con --session-id; al reabrir, --resume).
+    pub started: bool,
+    /// Forzar nativo (traidas: su historial esta indexado por la cwd del host).
+    pub native: bool,
+}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AppState {
@@ -28,6 +41,11 @@ pub struct AppState {
 
     #[serde(default)]
     pub collapsed_workspaces: HashSet<String>,
+
+    /// Estado de sesiones managed por job-id (session_id + modo). Persistido
+    /// para que Reabrir tras reiniciar michi recupere la conversacion (--resume).
+    #[serde(default)]
+    pub managed: HashMap<String, ManagedSession>,
 }
 
 impl AppState {
@@ -122,6 +140,18 @@ mod tests {
             }],
             selected_job_id: Some("job-1".into()),
             collapsed_workspaces: collapsed_ws,
+            managed: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "job-1".to_string(),
+                    ManagedSession {
+                        claude_session_id: "sess-abc".into(),
+                        started: true,
+                        native: false,
+                    },
+                );
+                m
+            },
         }
     }
 
@@ -132,6 +162,29 @@ mod tests {
         assert!(s.jobs.is_empty());
         assert!(s.selected_job_id.is_none());
         assert!(s.collapsed_workspaces.is_empty());
+        assert!(s.managed.is_empty());
+    }
+
+    #[test]
+    fn managed_session_serializes_roundtrip() {
+        let mut m = HashMap::new();
+        m.insert(
+            "j".to_string(),
+            ManagedSession {
+                claude_session_id: "s1".into(),
+                started: true,
+                native: true,
+            },
+        );
+        let state = AppState {
+            managed: m,
+            ..AppState::default()
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: AppState = serde_json::from_str(&json).unwrap();
+        let got = back.managed.get("j").expect("managed roundtrip");
+        assert_eq!(got.claude_session_id, "s1");
+        assert!(got.started && got.native);
     }
 
     #[test]
@@ -159,6 +212,10 @@ mod tests {
         assert_eq!(loaded.jobs[0].status, JobStatus::Idle);
         assert_eq!(loaded.selected_job_id.as_deref(), Some("job-1"));
         assert!(loaded.collapsed_workspaces.contains("ws-a"));
+        let managed = loaded.managed.get("job-1").expect("managed job-1 persiste");
+        assert_eq!(managed.claude_session_id, "sess-abc");
+        assert!(managed.started);
+        assert!(!managed.native);
         Ok(())
     }
 
