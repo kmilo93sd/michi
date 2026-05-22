@@ -653,7 +653,22 @@ impl App {
         while let Ok((backend_id, event)) = self.pty_rx.try_recv() {
             debug!(backend_id, ?event, "pty event");
             if matches!(event, PtyEvent::Exit) {
-                self.terminals.retain(|_, t| t.backend.id() != backend_id);
+                // claude termino en esta sesion. La marcamos "detenida" y bajamos
+                // su contenedor; NO auto-relanzamos: el usuario decide en el
+                // placeholder (Retomar / Reiniciar / Cerrar).
+                let job_id = self
+                    .terminals
+                    .iter()
+                    .find(|(_, t)| t.backend.id() == backend_id)
+                    .map(|(jid, _)| jid.clone());
+                if let Some(jid) = job_id {
+                    self.terminals.remove(&jid);
+                    docker::remove_container(&docker::container_name(&jid));
+                    if let Some(j) = self.jobs.iter_mut().find(|j| j.id == jid) {
+                        j.status = JobStatus::Paused;
+                    }
+                    self.mark_dirty();
+                }
             }
         }
     }
@@ -1464,32 +1479,77 @@ impl App {
 
         let outcome = render_job_header(ui, &job, &self.theme);
 
-        // Sesion detenida: no spawneamos terminal; mostramos placeholder + Reabrir.
+        // Sesion no activa (claude termino o el usuario la detuvo): no spawneamos
+        // terminal; mostramos un resumen + Retomar / Reiniciar / Cerrar.
         if job.status == JobStatus::Paused {
             let rect = ui.available_rect_before_wrap();
             ui.painter().rect_filled(rect, 0.0, self.theme.bg_base);
-            ui.add_space(28.0);
-            let mut reopen = false;
+            ui.add_space(32.0);
+            let mut do_resume = false;
+            let mut do_restart = false;
+            let mut do_close = false;
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Sesion detenida").color(self.theme.text_primary));
-                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Sesion detenida")
+                        .heading()
+                        .color(self.theme.text_primary),
+                );
+                ui.add_space(10.0);
+                // Resumen de la sesion.
+                ui.small(
+                    egui::RichText::new(format!("{} \u{B7} {}", job.repo, job.branch))
+                        .color(self.theme.text_primary),
+                );
+                ui.small(
+                    egui::RichText::new(job.worktree_path.display().to_string())
+                        .color(self.theme.text_muted)
+                        .monospace(),
+                );
+                ui.add_space(6.0);
                 ui.small(
                     egui::RichText::new(
-                        "El contenedor esta abajo. La conversacion se conserva (resume).",
+                        "La conversacion se conserva. Retomala donde quedo, \
+                         reinicia de cero, o cerra la sesion.",
                     )
                     .color(self.theme.text_muted),
                 );
-                ui.add_space(14.0);
-                if ui
-                    .add(egui::Button::new("Reabrir"))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    reopen = true;
-                }
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new("Retomar"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Vuelve la conversacion (claude --resume)")
+                        .clicked()
+                    {
+                        do_resume = true;
+                    }
+                    ui.add_space(8.0);
+                    if ui
+                        .add(egui::Button::new("Reiniciar"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Sesion nueva de cero (descarta la conversacion)")
+                        .clicked()
+                    {
+                        do_restart = true;
+                    }
+                    ui.add_space(8.0);
+                    if ui
+                        .add(egui::Button::new("Cerrar"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        do_close = true;
+                    }
+                });
             });
-            if reopen {
+            if do_resume {
                 self.reopen_session(job_id);
+            }
+            if do_restart {
+                self.restart_session(job_id);
+            }
+            if do_close {
+                self.request_close_job(job_id);
             }
             return outcome.close_clicked.then(|| job.id.clone());
         }
@@ -1853,6 +1913,29 @@ impl App {
     /// Reabre una sesion detenida: la marca Idle y la selecciona; el proximo
     /// render respawnea el terminal con `claude --resume <session_id>`.
     fn reopen_session(&mut self, job_id: &str) {
+        if let Some(j) = self.jobs.iter_mut().find(|j| j.id == job_id) {
+            j.status = JobStatus::Idle;
+        }
+        self.selected_job_id = Some(job_id.to_string());
+        self.selected_detected_pid = None;
+        self.mark_dirty();
+    }
+
+    /// Reinicia una sesion de cero: descarta la conversacion (nuevo session_id) y
+    /// la relanza con `claude --session-id <nuevo>`. Conserva el modo (nativo si
+    /// era traida). Baja el contenedor viejo por las dudas.
+    fn restart_session(&mut self, job_id: &str) {
+        docker::remove_container(&docker::container_name(job_id));
+        self.terminals.remove(job_id);
+        let native = self.managed.get(job_id).map(|m| m.native).unwrap_or(false);
+        self.managed.insert(
+            job_id.to_string(),
+            ManagedSession {
+                claude_session_id: uuid::Uuid::new_v4().to_string(),
+                started: false,
+                native,
+            },
+        );
         if let Some(j) = self.jobs.iter_mut().find(|j| j.id == job_id) {
             j.status = JobStatus::Idle;
         }
