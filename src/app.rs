@@ -1480,66 +1480,95 @@ impl App {
         let outcome = render_job_header(ui, &job, &self.theme);
 
         // Sesion no activa (claude termino o el usuario la detuvo): no spawneamos
-        // terminal; mostramos un resumen + Retomar / Reiniciar / Cerrar.
+        // terminal; mostramos una card centrada con resumen + acciones.
         if job.status == JobStatus::Paused {
             let rect = ui.available_rect_before_wrap();
             ui.painter().rect_filled(rect, 0.0, self.theme.bg_base);
-            ui.add_space(32.0);
+            let theme = &self.theme;
             let mut do_resume = false;
             let mut do_restart = false;
             let mut do_close = false;
             ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new("Sesion detenida")
-                        .heading()
-                        .color(self.theme.text_primary),
-                );
-                ui.add_space(10.0);
-                // Resumen de la sesion.
-                ui.small(
-                    egui::RichText::new(format!("{} \u{B7} {}", job.repo, job.branch))
-                        .color(self.theme.text_primary),
-                );
-                ui.small(
-                    egui::RichText::new(job.worktree_path.display().to_string())
-                        .color(self.theme.text_muted)
-                        .monospace(),
-                );
-                ui.add_space(6.0);
-                ui.small(
-                    egui::RichText::new(
-                        "La conversacion se conserva. Retomala donde quedo, \
-                         reinicia de cero, o cerra la sesion.",
-                    )
-                    .color(self.theme.text_muted),
-                );
-                ui.add_space(16.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::Button::new("Retomar"))
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Vuelve la conversacion (claude --resume)")
-                        .clicked()
-                    {
-                        do_resume = true;
-                    }
-                    ui.add_space(8.0);
-                    if ui
-                        .add(egui::Button::new("Reiniciar"))
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text("Sesion nueva de cero (descarta la conversacion)")
-                        .clicked()
-                    {
-                        do_restart = true;
-                    }
-                    ui.add_space(8.0);
-                    if ui
-                        .add(egui::Button::new("Cerrar"))
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        do_close = true;
-                    }
+                ui.add_space(80.0);
+                let card = egui::Frame::new()
+                    .fill(theme.bg_surface)
+                    .inner_margin(egui::Margin::same(24))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .stroke(egui::Stroke::new(1.0, theme.border));
+                card.show(ui, |ui| {
+                    ui.set_width(360.0);
+                    ui.vertical_centered(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                theme.status_paused,
+                                JobStatus::Paused.dot().to_string(),
+                            );
+                            ui.label(
+                                egui::RichText::new("Sesion detenida")
+                                    .heading()
+                                    .color(theme.text_primary),
+                            );
+                        });
+                        ui.add_space(12.0);
+                        ui.label(
+                            egui::RichText::new(format!("{} \u{B7} {}", job.repo, job.branch))
+                                .color(theme.text_primary),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new(job.worktree_path.display().to_string())
+                                .small()
+                                .monospace()
+                                .color(theme.text_muted),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("La conversacion se conserva.")
+                                .small()
+                                .color(theme.text_muted),
+                        );
+                        ui.add_space(18.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Retomar").color(theme.bg_base),
+                                    )
+                                    .fill(theme.accent)
+                                    .min_size(egui::vec2(96.0, 32.0)),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text("Vuelve la conversacion (claude --resume)")
+                                .clicked()
+                            {
+                                do_resume = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui
+                                .add(
+                                    egui::Button::new("Reiniciar").min_size(egui::vec2(96.0, 32.0)),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text("Sesion nueva de cero (descarta la conversacion)")
+                                .clicked()
+                            {
+                                do_restart = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Cerrar").color(theme.text_muted),
+                                    )
+                                    .min_size(egui::vec2(80.0, 32.0)),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                do_close = true;
+                            }
+                        });
+                    });
                 });
             });
             if do_resume {
