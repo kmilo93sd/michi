@@ -53,6 +53,9 @@ pub struct App {
     /// (--session-id vs --resume) y si va forzada a nativo (traidas). En memoria
     /// (v1, no persistido): tras reiniciar michi se pierde el link al session_id.
     managed: HashMap<String, ManagedSession>,
+    /// Etiqueta del modo de lanzamiento por job-id ("contenedor · rust:slim" o
+    /// "nativo"), para el badge del header. Se setea al spawnear el terminal.
+    launch_modes: HashMap<String, String>,
     /// Pendiente de eleccion: el usuario hizo click en ▶ de un repo y debe
     /// decidir si abrir sesion directa o worktree nuevo.
     start_choice: Option<StartChoice>,
@@ -225,6 +228,7 @@ impl App {
             detected_close_confirm: None,
             bring_confirm: None,
             managed: HashMap::new(),
+            launch_modes: HashMap::new(),
             start_choice: None,
             terminals: HashMap::new(),
             pty_tx,
@@ -323,6 +327,17 @@ impl App {
             let env = self.env_for_job(&job);
             let plan = self.build_launch_plan(&job, &env);
             debug!("job {job_id}: lanzando en modo {:?}", plan.mode);
+            // Guardar la etiqueta del modo para el badge del header.
+            let mode_label = match plan.mode {
+                docker::LaunchMode::Container => {
+                    format!(
+                        "contenedor \u{B7} {}",
+                        docker::detect_base_image(&job.worktree_path)
+                    )
+                }
+                docker::LaunchMode::Native => "nativo".to_string(),
+            };
+            self.launch_modes.insert(job_id.to_string(), mode_label);
             // En modo contenedor el nombre es determinista (michi-<id>); si quedo
             // uno colgado (cierre de claude, reinicio de michi), `docker run`
             // chocaria por nombre. Lo borramos antes (best-effort).
@@ -1477,7 +1492,12 @@ impl App {
     fn render_selected_job(&mut self, ui: &mut egui::Ui, job_id: &str) -> Option<String> {
         let job = self.jobs.iter().find(|j| j.id == job_id).cloned()?;
 
-        let outcome = render_job_header(ui, &job, &self.theme);
+        let outcome = render_job_header(
+            ui,
+            &job,
+            &self.theme,
+            self.launch_modes.get(job_id).map(String::as_str),
+        );
 
         // Sesion no activa (claude termino o el usuario la detuvo): no spawneamos
         // terminal; mostramos una card centrada con resumen + acciones.
@@ -2846,7 +2866,12 @@ struct JobPaneOutcome {
     close_clicked: bool,
 }
 
-fn render_job_header(ui: &mut egui::Ui, job: &Job, theme: &Theme) -> JobPaneOutcome {
+fn render_job_header(
+    ui: &mut egui::Ui,
+    job: &Job,
+    theme: &Theme,
+    mode_label: Option<&str>,
+) -> JobPaneOutcome {
     let mut outcome = JobPaneOutcome {
         close_clicked: false,
     };
@@ -2868,6 +2893,15 @@ fn render_job_header(ui: &mut egui::Ui, job: &Job, theme: &Theme) -> JobPaneOutc
             ui.strong(title);
             ui.label(job.worktree_path.to_string_lossy().replace('\\', "/"));
             ui.horizontal(|ui| {
+                // Badge del modo: contenedor (accent) o nativo (muted).
+                if let Some(label) = mode_label {
+                    let color = if label.starts_with("contenedor") {
+                        theme.accent
+                    } else {
+                        theme.text_muted
+                    };
+                    render_chip(ui, label, color, theme);
+                }
                 // En sesiones in-place el conteo de archivos no significa
                 // nada (cwd compartido con cambios pre-existentes), asi que
                 // lo omitimos. Solo se muestra en worktrees reales.
