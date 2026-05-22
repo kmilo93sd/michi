@@ -117,6 +117,9 @@ src/
 │                          (managed + externas), estado real, titulo, agrupa por cwd
 ├── claude_config.rs    -- inventario de skills/agents/MCPs por scope
 │                          (global/workspace/repo) para los totales del sidebar
+├── docker.rs           -- modo contenedor: detect_docker, detect_base_image,
+│                          build_run_args/plan_launch, ensure_claude_binary (docker-cp),
+│                          create/resume command, container_name, gc_orphan_containers
 ├── resource_monitor.rs -- arbol de procesos por sesion (sysinfo), RAM, classify
 ├── port_detector.rs    -- detecta PORT_* en .env del repo/worktree
 ├── port_alloc.rs       -- asigna rangos de puerto por sesion, inyecta env vars
@@ -127,9 +130,10 @@ src/
 └── tests embebidos en cada archivo con #[cfg(test)] mod tests { ... }
 ```
 
-> Roadmap V1 agrega modulos para: DB isolation (postgres compartido + DB por
-> sesion), sandbox en contenedor (lifecycle Docker), e inyeccion de prompts a
-> sesiones managed. Ver `specs/20260517-1716-michi-poc/PHASES.md`.
+> Estado: el sandbox en contenedor (Fase D Cut-1) esta hecho (#42-#50): lanzar /
+> traer / detener / reabrir sesiones, autenticadas, con badge de modo. Pendiente
+> en Roadmap V1: persistir session_id, inyectar prompts a managed, split-anatomy,
+> DB isolation. Ver `specs/20260517-1716-michi-poc/PHASES.md` y `SESSION.md`.
 
 Decisión arquitectónica: `lib + bin split`. La lib expone API pública;
 `main.rs` es delgado. Esto asegura que cada `pub fn` esté cubierto por
