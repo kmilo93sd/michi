@@ -391,6 +391,11 @@ impl App {
         job: &Job,
         env: &BTreeMap<String, String>,
     ) -> docker::LaunchPlan {
+        // Re-detectar Docker en cada lanzamiento: el estado del boot puede estar
+        // stale (el usuario cerro/abrio Docker despues). Si no esta disponible
+        // AHORA, la sesion cae a nativo con gracia en vez de fallar el docker run.
+        self.docker_status = docker::detect_docker();
+
         let host_arch = std::env::consts::ARCH;
         let claude_bin = docker::claude_binary_path(&self.claude_bin_dir, host_arch);
         let claude_ready = claude_bin.is_file();
