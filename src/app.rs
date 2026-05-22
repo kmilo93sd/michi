@@ -12,7 +12,7 @@ use crate::docker;
 use crate::port_alloc;
 use crate::port_detector;
 use crate::resource_monitor;
-use crate::state::{self, AppState, Job, JobStatus, Workspace};
+use crate::state::{self, AppState, Job, JobStatus, ManagedSession, Workspace};
 use crate::system;
 use crate::terminal::JobTerminal;
 use crate::theme::Theme;
@@ -134,16 +134,6 @@ struct DetectedCloseConfirm {
     tree_pids: Vec<u32>,
 }
 
-/// Estado en memoria de una sesion managed (la que michi lanza/controla).
-struct ManagedSession {
-    /// session_id de Claude (generado por michi, o el de la externa traida).
-    claude_session_id: String,
-    /// Si ya se lanzo (1a vez se crea con --session-id; al reabrir, --resume).
-    started: bool,
-    /// Forzar nativo (traidas: su historial esta indexado por la cwd del host).
-    native: bool,
-}
-
 /// Confirmacion para "traer a michi" una sesion externa: cierra la externa y
 /// la reabre con `claude --resume` adentro de michi.
 struct BringConfirm {
@@ -227,7 +217,7 @@ impl App {
             close_confirm: None,
             detected_close_confirm: None,
             bring_confirm: None,
-            managed: HashMap::new(),
+            managed: persisted.managed,
             launch_modes: HashMap::new(),
             start_choice: None,
             terminals: HashMap::new(),
@@ -355,6 +345,9 @@ impl App {
             ) {
                 Ok(t) => {
                     self.terminals.insert(job_id.to_string(), t);
+                    // Persistir el managed (session_id/started/modo) que
+                    // build_launch_plan acaba de crear/actualizar.
+                    self.mark_dirty();
                 }
                 Err(e) => {
                     warn!("no se pudo spawnear terminal para job {job_id}: {e:#}");
@@ -1125,6 +1118,7 @@ impl App {
             jobs: self.jobs.clone(),
             selected_job_id: self.selected_job_id.clone(),
             collapsed_workspaces: self.collapsed_workspaces.clone(),
+            managed: self.managed.clone(),
         }
     }
 
